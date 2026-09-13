@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Ego Chrome Bridge",
+  "version": "0.2.0",
+  "description": "Local semantic browser automation bridge for Codex.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "storage",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Reconnect Ego Chrome Bridge"
+  },
+  "options_page": "options.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:*"
+  },
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ]
+}

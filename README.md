@@ -9,6 +9,7 @@
 | 技能名称 | 说明 | 适用场景 | 快速入口 |
 | :--- | :--- | :--- | :--- |
 | **`academic-course-writing-zh`** | 面向中文工科、电子信息及其他高专业度课程论文的写作、润色与“去 AI 模板化”校准 Skill。 | 论文起草、逻辑梳理、文风校准、降低 AI 味、保护证据与术语保真 | [查看详情](./academic-course-writing-zh/README.md) |
+| **`ego-chrome`** | 基于 CitroLabs ego 原项目二次开发的 Chrome 浏览器自动化 Skill，包含 Chrome MV3 插件本体与 CLI 桥接。直接复用用户当前 Chrome Profile 登录态，提供低 Token 语义快照。 | 浏览器操作、带登录态自动化、数据抓取、表单填写、低 Token 网页交互 | [查看详情](./ego-chrome/README.md) |
 
 ---
 
@@ -22,6 +23,14 @@
   - **去模板化**：排查空泛宏大背景（“随着……的不断发展”）、机械三段论、无来源权威口吻等典型 AI 特征；
   - **样本校准**：支持放入 2–5 段作者本人历史写作样本（放入 `human-samples/`），提取并校准专属 Style Profile；
   - **多工作模式**：支持 `PLAN`（提纲梳理）、`DRAFT`（段落起草）、`REWRITE/POLISH`（润色与微调）、`REVIEW`（风险评审）、`STYLE-CALIBRATE`（文风画像）。
+
+### 2. ego-chrome (带登录态 Chrome 自动化与插件本体)
+- **核心定位**：基于 [CitroLabs ego-lite / ego-browser](https://github.com/citrolabs/ego-lite) 二次开发。无需定制编译 Chromium，采用 Chrome 官方 MV3 扩展配合本地 Node.js CLI，无缝挂载用户正在使用的 Chrome 浏览器。
+- **主要特性**：
+  - **包含插件本体**：内置完整 Chrome 扩展源码（位于 `ego-chrome/extension/`），直接在 Chrome 中以“开发者模式”加载即可；
+  - **复用个人登录态**：免去账号密码、二次验证或验证码困扰，直接继承当前浏览器的 Cookies、LocalStorage 与登录 Session；
+  - **超低 Token 语义快照**：通过无障碍树与精简 DOM 抽取结构化文本快照，避免多模态截图带来的高昂 Token 开销与延迟；
+  - **Playwright 风格操作**：通过 `ego-chrome nodejs` 支持链式或语义选择器（Role、Label、Text、CSS）操控页面。
 
 ---
 
