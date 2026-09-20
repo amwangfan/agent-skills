@@ -1,7 +1,7 @@
 {
   "name": "ego-chrome-extension",
-  "version": "0.2.1",
-  "description": "Local-first Chrome automation bridge and Codex skill with semantic snapshots.",
+  "version": "0.2.2",
+  "description": "Local-first Chrome automation bridge and Agent skill with semantic snapshots.",
   "type": "module",
   "bin": {
     "ego-chrome": "./src/cli.mjs"
@@ -9,7 +9,7 @@
   "scripts": {
     "bridge": "node ./src/bridge-process.mjs",
     "test": "node --test",
-    "check": "node --check ./src/cli.mjs && node --check ./src/bridge.mjs && node --check ./src/runtime.mjs && node --check ./src/low-token-runtime.mjs && node --check ./src/semantic-runtime.mjs && node --check ./src/semantic-locators.mjs && node --check ./extension/service-worker.js && node --check ./extension/snapshot.js"
+    "check": "node --check ./src/cli.mjs && node --check ./src/config.mjs && node --check ./src/bridge.mjs && node --check ./src/bridge-process.mjs && node --check ./src/rpc-client.mjs && node --check ./src/runtime.mjs && node --check ./src/low-token-runtime.mjs && node --check ./src/semantic-runtime.mjs && node --check ./src/semantic-locators.mjs && node --check ./extension/service-worker.js && node --check ./extension/snapshot.js && node --check ./extension/options.js"
   },
   "engines": {
     "node": ">=20"

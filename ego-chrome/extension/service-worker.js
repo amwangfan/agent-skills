@@ -1,39 +1,169 @@
 import { createSemanticSnapshot } from './snapshot.js'
 
 const DEFAULT_PORT = 32145
+const DEFAULT_CDP_TIMEOUT_MS = 25_000
+
 const refsByTab = new Map()
 const attachedTabs = new Set()
 const attachPromises = new Map()
 const backgroundStateByTab = new Map()
 const originalDiscardabilityByTab = new Map()
+const nextDialogActionByTab = new Map()
+const lastDialogByTab = new Map()
+const navigationWaitersByTab = new Map()
+
 let pollGeneration = 0
 let polling = false
 let pollController = null
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.runtime.openOptionsPage().catch(() => {})
-  chrome.alarms.create('ego-chrome-reconnect', { periodInMinutes: 1 })
-  restartPolling()
-})
-chrome.runtime.onStartup.addListener(restartPolling)
-chrome.action.onClicked.addListener(restartPolling)
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'ego-chrome-reconnect' && !polling) restartPolling()
-})
-chrome.storage.onChanged.addListener((_changes, area) => {
-  if (area === 'local') restartPolling()
-})
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId) {
-    attachedTabs.delete(source.tabId)
-    attachPromises.delete(source.tabId)
-    refsByTab.delete(source.tabId)
-    backgroundStateByTab.delete(source.tabId)
-    void restoreTabDiscardability(source.tabId)
-  }
-})
+if (typeof chrome !== 'undefined' && chrome?.runtime?.onInstalled) {
+  chrome.runtime.onInstalled.addListener(() => {
+    chrome.runtime.openOptionsPage().catch(() => {})
+    chrome.alarms.create('ego-chrome-reconnect', { periodInMinutes: 1 })
+    restartPolling()
+  })
+  chrome.runtime.onStartup.addListener(restartPolling)
+  chrome.action.onClicked.addListener(restartPolling)
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'ego-chrome-reconnect' && !polling) restartPolling()
+  })
+  chrome.storage.onChanged.addListener((_changes, area) => {
+    if (area === 'local') restartPolling()
+  })
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    cleanupTabState(tabId)
+  })
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source.tabId) {
+      void restoreTabDiscardability(source.tabId)
+      cleanupTabState(source.tabId)
+    }
+  })
+  chrome.debugger.onEvent.addListener((source, method, params = {}) => {
+    const tabId = source?.tabId
+    if (!tabId) return
 
-restartPolling()
+    if (method === 'Page.javascriptDialogOpening') {
+      handleDialogOpening(tabId, params)
+      return
+    }
+
+    if (method === 'Page.loadEventFired' || method === 'Page.navigatedWithinDocument') {
+      handleNavigationEvent(tabId, method, params)
+      return
+    }
+  })
+
+  restartPolling()
+}
+
+function cleanupTabState(tabId) {
+  attachedTabs.delete(tabId)
+  attachPromises.delete(tabId)
+  refsByTab.delete(tabId)
+  backgroundStateByTab.delete(tabId)
+  originalDiscardabilityByTab.delete(tabId)
+  nextDialogActionByTab.delete(tabId)
+  lastDialogByTab.delete(tabId)
+  const waiters = navigationWaitersByTab.get(tabId)
+  if (waiters) {
+    navigationWaitersByTab.delete(tabId)
+    for (const waiter of waiters) {
+      waiter.reject(rpcError('TAB_CLOSED', `Tab ${tabId} was closed`))
+    }
+  }
+}
+
+function handleDialogOpening(tabId, params) {
+  const configured = nextDialogActionByTab.get(tabId)
+  nextDialogActionByTab.delete(tabId)
+
+  // Default is safe dismiss, especially for beforeunload and unhandled dialogs
+  const action = configured ? configured.action : 'dismiss'
+  const accept = action === 'accept'
+  const promptText = configured?.promptText
+
+  lastDialogByTab.set(tabId, {
+    type: params.type || 'alert',
+    message: params.message || '',
+    url: params.url || '',
+    defaultPrompt: params.defaultPrompt,
+    action,
+    promptText,
+    timestamp: Date.now(),
+  })
+
+  const cdpParams = { accept }
+  if (promptText !== undefined && promptText !== null) {
+    cdpParams.promptText = String(promptText)
+  }
+
+  // Use raw chrome.debugger.sendCommand to avoid recursive ensureAttached
+  chrome.debugger.sendCommand({ tabId }, 'Page.handleJavaScriptDialog', cdpParams, () => {})
+}
+
+function handleNavigationEvent(tabId, method, params) {
+  const waiters = navigationWaitersByTab.get(tabId)
+  if (!waiters || waiters.size === 0) return
+
+  if (method === 'Page.loadEventFired' || method === 'Page.navigatedWithinDocument') {
+    for (const waiter of [...waiters]) {
+      waiter.resolve()
+    }
+  }
+}
+
+function registerNavigationWaiter(tabId, timeoutMs, targetUrl) {
+  let timer = null
+  let resolvePromise
+  let rejectPromise
+  let settled = false
+
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve
+    rejectPromise = reject
+  })
+
+  const cleanup = () => {
+    if (settled) return
+    settled = true
+    if (timer) clearTimeout(timer)
+    const waiters = navigationWaitersByTab.get(tabId)
+    if (waiters) {
+      waiters.delete(waiter)
+      if (waiters.size === 0) navigationWaitersByTab.delete(tabId)
+    }
+  }
+
+  timer = setTimeout(() => {
+    cleanup()
+    rejectPromise(rpcError('TIMEOUT', `Timed out loading ${targetUrl}`))
+  }, timeoutMs)
+
+  const waiter = {
+    promise,
+    resolve: (val) => {
+      cleanup()
+      resolvePromise(val)
+    },
+    reject: (err) => {
+      cleanup()
+      rejectPromise(err)
+    },
+    cancel: () => {
+      cleanup()
+    },
+  }
+
+  let waiters = navigationWaitersByTab.get(tabId)
+  if (!waiters) {
+    waiters = new Set()
+    navigationWaitersByTab.set(tabId, waiters)
+  }
+  waiters.add(waiter)
+
+  return waiter
+}
 
 function restartPolling() {
   pollGeneration += 1
@@ -118,7 +248,7 @@ async function dispatch(method, params) {
     case 'tabs.active':
       return activeTab()
     case 'tabs.open':
-      return sanitizeTab(await chrome.tabs.create({ url: params.url || 'about:blank', active: params.active === true }))
+      return openTabInExtension(params)
     case 'tabs.close':
       await detachTab(params.tabId)
       await chrome.tabs.remove(requireTabId(params.tabId))
@@ -137,14 +267,117 @@ async function dispatch(method, params) {
     case 'page.press':
       return pressPage(params.tabId, params.key, params.options)
     case 'page.goto':
-      refsByTab.delete(requireTabId(params.tabId))
-      return sendCommand(params.tabId, 'Page.navigate', { url: String(params.url) })
+      return gotoPage(params.tabId, params.url, params)
+    case 'page.setNextDialogAction':
+    case 'page.setDialogAction': {
+      const tabId = requireTabId(params.tabId)
+      const action = params.action === 'accept' ? 'accept' : 'dismiss'
+      const promptText = params.promptText !== undefined && params.promptText !== null ? String(params.promptText) : undefined
+      nextDialogActionByTab.set(tabId, { action, promptText })
+      return { configured: true, action, promptText }
+    }
+    case 'page.lastDialog': {
+      const tabId = requireTabId(params.tabId)
+      return lastDialogByTab.get(tabId) || null
+    }
     case 'page.info':
       return pageInfo(params.tabId)
     case 'page.evaluate':
       return evaluatePage(params.tabId, String(params.expression))
     default:
       throw rpcError('METHOD_NOT_FOUND', `Unknown extension method: ${method}`)
+  }
+}
+
+async function openTabInExtension(params) {
+  const tab = await chrome.tabs.create({ url: params.url || 'about:blank', active: params.active === true })
+  const shouldWait = params.wait !== false && params.url && params.url !== 'about:blank'
+  if (shouldWait) {
+    const timeout = Number(params.timeout || 20_000)
+    const completedTab = await waitForTabLoadComplete(tab.id, timeout, params.url)
+    return sanitizeTab(completedTab)
+  }
+  return sanitizeTab(tab)
+}
+
+function waitForTabLoadComplete(tabId, timeoutMs, targetUrl) {
+  return new Promise((resolve, reject) => {
+    let timer = null
+    let settled = false
+
+    const cleanup = () => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      chrome.tabs.onUpdated.removeListener(onUpdated)
+      chrome.tabs.onRemoved.removeListener(onRemoved)
+    }
+
+    const onUpdated = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId) return
+      const status = changeInfo.status || tab?.status
+      const url = tab?.url || changeInfo.url || ''
+      if (status === 'complete' && url && url !== 'about:blank') {
+        cleanup()
+        resolve(tab || { id: tabId, url, status })
+      }
+    }
+
+    const onRemoved = (removedTabId) => {
+      if (removedTabId !== tabId) return
+      cleanup()
+      reject(rpcError('TAB_CLOSED', `Tab ${tabId} was closed before loading completed`))
+    }
+
+    timer = setTimeout(() => {
+      cleanup()
+      reject(rpcError('TIMEOUT', `Timed out loading ${targetUrl || 'page'}`))
+    }, timeoutMs)
+
+    chrome.tabs.onUpdated.addListener(onUpdated)
+    chrome.tabs.onRemoved.addListener(onRemoved)
+
+    chrome.tabs.get(tabId).then((currentTab) => {
+      if (settled) return
+      if (currentTab && currentTab.status === 'complete' && currentTab.url && currentTab.url !== 'about:blank') {
+        cleanup()
+        resolve(currentTab)
+      }
+    }).catch(() => {})
+  })
+}
+
+async function gotoPage(tabId, url, options = {}) {
+  tabId = requireTabId(tabId)
+  refsByTab.delete(tabId)
+  await ensureAttached(tabId)
+
+  const targetUrl = String(url)
+  const shouldWait = options.wait !== false
+  const timeoutMs = Number(options.timeout || 20_000)
+
+  let navWaiter = null
+  if (shouldWait) {
+    navWaiter = registerNavigationWaiter(tabId, timeoutMs, targetUrl)
+  }
+
+  try {
+    const result = await sendCommand(tabId, 'Page.navigate', { url: targetUrl })
+    if (result?.errorText) {
+      if (navWaiter) navWaiter.cancel()
+      throw rpcError('NAVIGATION_FAILED', `Navigation failed: ${result.errorText}`)
+    }
+
+    if (shouldWait && navWaiter) {
+      if (!result.loaderId) {
+        navWaiter.resolve(result)
+      }
+      await navWaiter.promise
+    }
+    return result
+  } catch (error) {
+    if (navWaiter) navWaiter.cancel()
+    throw error
   }
 }
 
@@ -207,37 +440,41 @@ async function clickPage(tabId, target, options = {}) {
 async function fillPage(tabId, target, value) {
   tabId = requireTabId(tabId)
   const backendNodeId = await resolveTarget(tabId, target)
-  const resolved = await sendCommand(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup: 'ego-chrome' })
-  const objectId = resolved?.object?.objectId
-  if (!objectId) throw rpcError('ELEMENT_NOT_FOUND', `Could not resolve target: ${target}`)
-  const result = await sendCommand(tabId, 'Runtime.callFunctionOn', {
-    objectId,
-    functionDeclaration: `function(value) {
-      const element = this;
-      element.focus();
-      if (element.isContentEditable) {
-        element.textContent = value;
-      } else {
-        let prototype = element;
-        let setter;
-        while (prototype && !setter) {
-          const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
-          setter = descriptor?.set;
-          prototype = Object.getPrototypeOf(prototype);
+  try {
+    const resolved = await sendCommand(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup: 'ego-chrome' })
+    const objectId = resolved?.object?.objectId
+    if (!objectId) throw rpcError('ELEMENT_NOT_FOUND', `Could not resolve target: ${target}`)
+    const result = await sendCommand(tabId, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function(value) {
+        const element = this;
+        element.focus();
+        if (element.isContentEditable) {
+          element.textContent = value;
+        } else {
+          let prototype = element;
+          let setter;
+          while (prototype && !setter) {
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+            setter = descriptor?.set;
+            prototype = Object.getPrototypeOf(prototype);
+          }
+          if (setter) setter.call(element, value);
+          else element.value = value;
         }
-        if (setter) setter.call(element, value);
-        else element.value = value;
-      }
-      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }`,
-    arguments: [{ value: String(value ?? '') }],
-    returnByValue: true,
-    awaitPromise: true,
-  })
-  throwIfRuntimeException(result)
-  return true
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }`,
+      arguments: [{ value: String(value ?? '') }],
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    throwIfRuntimeException(result)
+    return true
+  } finally {
+    await sendCommand(tabId, 'Runtime.releaseObjectGroup', { objectGroup: 'ego-chrome' }).catch(() => null)
+  }
 }
 
 async function pressPage(tabId, keySpec, options = {}) {
@@ -251,7 +488,7 @@ async function pressPage(tabId, keySpec, options = {}) {
     modifiers: parsed.modifiers,
   }
   await sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...common })
-  if (parsed.text && !parsed.modifiers) {
+  if (parsed.text && !(parsed.modifiers & ~8)) {
     await sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', ...common, text: parsed.text, unmodifiedText: parsed.text })
   }
   await sendCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...common })
@@ -290,11 +527,23 @@ async function resolveTarget(tabId, target) {
   return backendNodeId
 }
 
-async function sendCommand(tabId, method, params = {}) {
+async function sendCommand(tabId, method, params = {}, options = {}) {
   tabId = requireTabId(tabId)
   await ensureAttached(tabId)
+  const timeoutMs = Number(options?.timeoutMs || options?.timeout || DEFAULT_CDP_TIMEOUT_MS)
+
   return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(rpcError('CDP_TIMEOUT', `CDP command timed out after ${timeoutMs}ms: ${method}`))
+    }, timeoutMs)
+
     chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       const error = chrome.runtime.lastError
       if (error) {
         if (/not attached|No tab with given id|closed/i.test(error.message || '')) attachedTabs.delete(tabId)
@@ -306,13 +555,22 @@ async function sendCommand(tabId, method, params = {}) {
   })
 }
 
+function verifyDebuggerSession(tabId) {
+  return new Promise((resolve) => {
+    chrome.debugger.sendCommand({ tabId }, 'Page.enable', {}, () => {
+      resolve(!chrome.runtime.lastError)
+    })
+  })
+}
+
 async function ensureAttached(tabId) {
   if (attachedTabs.has(tabId)) return
   if (attachPromises.has(tabId)) return attachPromises.get(tabId)
 
   const attaching = (async () => {
     const tab = await chrome.tabs.get(tabId)
-    if (!isControllableUrl(tab.url)) throw rpcError('UNSUPPORTED_URL', `Chrome cannot debug this page: ${tab.url}`)
+    const tabUrl = tab.url || tab.pendingUrl || ''
+    if (!isControllableUrl(tabUrl)) throw rpcError('UNSUPPORTED_URL', `Chrome cannot debug this page: ${tabUrl}`)
 
     if (!originalDiscardabilityByTab.has(tabId)) {
       originalDiscardabilityByTab.set(tabId, tab.autoDiscardable !== false)
@@ -321,13 +579,23 @@ async function ensureAttached(tabId) {
     if (tab.discarded) await chrome.tabs.reload(tabId).catch(() => null)
 
     try {
-      await new Promise((resolve, reject) => {
+      let attachError = null
+      await new Promise((resolve) => {
         chrome.debugger.attach({ tabId }, '1.3', () => {
-          const error = chrome.runtime.lastError
-          if (error) reject(rpcError('ATTACH_FAILED', error.message))
-          else resolve()
+          attachError = chrome.runtime.lastError || null
+          resolve()
         })
       })
+      if (attachError) {
+        if (/already attached/i.test(attachError.message || '')) {
+          const verified = await verifyDebuggerSession(tabId)
+          if (!verified) {
+            throw rpcError('ATTACH_FAILED', attachError.message)
+          }
+        } else {
+          throw rpcError('ATTACH_FAILED', attachError.message)
+        }
+      }
       attachedTabs.add(tabId)
       await sendCommand(tabId, 'Page.enable').catch(() => null)
       await sendCommand(tabId, 'DOM.enable').catch(() => null)
@@ -355,15 +623,14 @@ async function ensureAttached(tabId) {
 }
 
 async function detachTab(tabId) {
+  tabId = requireTabId(tabId)
   if (attachedTabs.has(tabId)) {
     await sendCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: false }).catch(() => null)
     await sendCommand(tabId, 'Emulation.clearIdleOverride').catch(() => null)
     await new Promise((resolve) => chrome.debugger.detach({ tabId }, () => resolve()))
   }
-  attachedTabs.delete(tabId)
-  refsByTab.delete(tabId)
-  backgroundStateByTab.delete(tabId)
   await restoreTabDiscardability(tabId)
+  cleanupTabState(tabId)
 }
 
 async function tryBackgroundCommand(tabId, method, params = {}) {
@@ -384,13 +651,13 @@ async function restoreTabDiscardability(tabId) {
 
 async function listTabs() {
   const tabs = await chrome.tabs.query({})
-  return tabs.filter((tab) => tab.id && isControllableUrl(tab.url)).map(sanitizeTab)
+  return tabs.filter((tab) => tab.id && isControllableUrl(tab.url || tab.pendingUrl || '')).map(sanitizeTab)
 }
 
 async function activeTab() {
   const current = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
-  const tab = current.find((candidate) => candidate.id && isControllableUrl(candidate.url))
-    || (await chrome.tabs.query({ active: true })).find((candidate) => candidate.id && isControllableUrl(candidate.url))
+  const tab = current.find((candidate) => candidate.id && isControllableUrl(candidate.url || candidate.pendingUrl || ''))
+    || (await chrome.tabs.query({ active: true })).find((candidate) => candidate.id && isControllableUrl(candidate.url || candidate.pendingUrl || ''))
     || (await listTabs())[0]
   if (!tab) throw rpcError('NO_TAB', 'No controllable Chrome tab is available')
   return sanitizeTab(tab)
@@ -401,7 +668,7 @@ function sanitizeTab(tab) {
     id: tab.id,
     windowId: tab.windowId,
     title: tab.title || '',
-    url: tab.url || '',
+    url: tab.url || tab.pendingUrl || '',
     active: Boolean(tab.active),
     pinned: Boolean(tab.pinned),
   }
@@ -434,28 +701,107 @@ function throwIfRuntimeException(response) {
 }
 
 function parseKeySpec(spec) {
-  const parts = spec.split('+').map((part) => part.trim()).filter(Boolean)
-  const key = parts.pop() || ''
+  const raw = String(spec || '').trim()
+  if (!raw) {
+    return { key: '', code: '', virtualKeyCode: 0, modifiers: 0, text: '' }
+  }
+
+  let key = ''
+  let modifierParts = []
+
+  if (raw === '+') {
+    key = '+'
+  } else if (raw.endsWith('++')) {
+    key = '+'
+    modifierParts = raw.slice(0, -2).split('+').map((p) => p.trim()).filter(Boolean)
+  } else {
+    const parts = raw.split('+').map((part) => part.trim()).filter(Boolean)
+    key = parts.pop() || ''
+    modifierParts = parts
+  }
+
   let modifiers = 0
-  for (const modifier of parts) {
+  for (const modifier of modifierParts) {
     if (/^(alt)$/i.test(modifier)) modifiers |= 1
     else if (/^(control|ctrl)$/i.test(modifier)) modifiers |= 2
     else if (/^(meta|command|cmd|windows)$/i.test(modifier)) modifiers |= 4
     else if (/^shift$/i.test(modifier)) modifiers |= 8
   }
+
+  const hasShift = Boolean(modifiers & 8)
+  const shiftDigits = { '1': '!', '2': '@', '3': '#', '4': '$', '5': '%', '6': '^', '7': '&', '8': '*', '9': '(', '0': ')' }
+  const shiftSymbols = { '=': '+', '-': '_', '[': '{', ']': '}', ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~', '\\': '|' }
+
+  let code = key
+  let virtualKeyCode = 0
+  let text = ''
+
   const named = {
-    Enter: ['Enter', 13], Tab: ['Tab', 9], Escape: ['Escape', 27], Backspace: ['Backspace', 8],
-    Delete: ['Delete', 46], ArrowLeft: ['ArrowLeft', 37], ArrowUp: ['ArrowUp', 38],
-    ArrowRight: ['ArrowRight', 39], ArrowDown: ['ArrowDown', 40], Home: ['Home', 36], End: ['End', 35],
-    PageUp: ['PageUp', 33], PageDown: ['PageDown', 34], Space: [' ', 32],
+    Enter: ['Enter', 13, 'Enter'],
+    Tab: ['Tab', 9, 'Tab'],
+    Escape: ['Escape', 27, 'Escape'],
+    Backspace: ['Backspace', 8, 'Backspace'],
+    Delete: ['Delete', 46, 'Delete'],
+    ArrowLeft: ['ArrowLeft', 37, 'ArrowLeft'],
+    ArrowUp: ['ArrowUp', 38, 'ArrowUp'],
+    ArrowRight: ['ArrowRight', 39, 'ArrowRight'],
+    ArrowDown: ['ArrowDown', 40, 'ArrowDown'],
+    Home: ['Home', 36, 'Home'],
+    End: ['End', 35, 'End'],
+    PageUp: ['PageUp', 33, 'PageUp'],
+    PageDown: ['PageDown', 34, 'PageDown'],
+    Space: [' ', 32, 'Space'],
   }
-  const definition = named[key] || [key, key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0]
+
+  if (named[key]) {
+    const def = named[key]
+    key = def[0]
+    virtualKeyCode = def[1]
+    code = def[2]
+    text = key === ' ' ? ' ' : ''
+  } else if (/^[0-9]$/.test(key)) {
+    code = `Digit${key}`
+    virtualKeyCode = key.charCodeAt(0)
+    if (hasShift && shiftDigits[key]) {
+      key = shiftDigits[key]
+      text = key
+    } else {
+      text = key
+    }
+  } else if (/^[a-zA-Z]$/.test(key)) {
+    code = `Key${key.toUpperCase()}`
+    virtualKeyCode = key.toUpperCase().charCodeAt(0)
+    key = hasShift ? key.toUpperCase() : key
+    text = key
+  } else if (key === '+' || key.toLowerCase() === 'plus') {
+    key = '+'
+    code = 'Equal'
+    virtualKeyCode = 187
+    text = '+'
+  } else if (key === '=') {
+    code = 'Equal'
+    virtualKeyCode = 187
+    if (hasShift) {
+      key = '+'
+      text = '+'
+    } else {
+      text = '='
+    }
+  } else if (key.length === 1) {
+    code = key
+    virtualKeyCode = key.charCodeAt(0)
+    if (hasShift && shiftSymbols[key]) {
+      key = shiftSymbols[key]
+    }
+    text = key
+  }
+
   return {
-    key: definition[0],
-    code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
-    virtualKeyCode: definition[1],
+    key,
+    code,
+    virtualKeyCode,
     modifiers,
-    text: key.length === 1 ? key : key === 'Space' ? ' ' : '',
+    text,
   }
 }
 
@@ -469,4 +815,28 @@ function setBadge(text, color, title) {
   chrome.action.setBadgeText({ text }).catch(() => {})
   chrome.action.setBadgeBackgroundColor({ color }).catch(() => {})
   chrome.action.setTitle({ title }).catch(() => {})
+}
+
+export {
+  parseKeySpec,
+  isControllableUrl,
+  cleanupTabState,
+  handleDialogOpening,
+  handleNavigationEvent,
+  registerNavigationWaiter,
+  waitForTabLoadComplete,
+  gotoPage,
+  openTabInExtension,
+  ensureAttached,
+  detachTab,
+  sendCommand,
+  verifyDebuggerSession,
+  attachedTabs,
+  nextDialogActionByTab,
+  lastDialogByTab,
+  navigationWaitersByTab,
+  refsByTab,
+  backgroundStateByTab,
+  originalDiscardabilityByTab,
+  dispatch,
 }

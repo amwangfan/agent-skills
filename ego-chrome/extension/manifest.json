@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Ego Chrome Bridge",
-  "version": "0.2.0",
-  "description": "Local semantic browser automation bridge for Codex.",
+  "version": "0.2.2",
+  "description": "Local semantic browser automation bridge for AI Agents.",
   "minimum_chrome_version": "120",
   "permissions": [
     "alarms",

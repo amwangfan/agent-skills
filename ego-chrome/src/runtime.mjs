@@ -78,12 +78,17 @@ export function createRuntime(rpc, options = {}) {
     },
 
     async openTab(url = 'about:blank', options = {}) {
-      const tab = await call('tabs.open', { url, active: options.active === true })
+      const tab = await call(
+        'tabs.open',
+        {
+          url,
+          active: options.active === true,
+          wait: options.wait,
+          timeout: options.timeout,
+        },
+        { timeoutMs: options.timeout || 20_000 },
+      )
       await rememberTabId(tab.id)
-      if (options.wait !== false && isWebUrl(url)) {
-        const loaded = await page.waitForLoadState({ timeout: options.timeout || 20_000 })
-        if (!loaded) throw new Error(`Timed out loading ${url}`)
-      }
       return tab
     },
 
@@ -164,12 +169,37 @@ export function createRuntime(rpc, options = {}) {
 
     async goto(url, options = {}) {
       const tabId = requireSelectedTabId()
-      const result = await call('page.goto', { tabId, url })
-      if (options.wait !== false) {
-        const loaded = await page.waitForLoadState({ timeout: options.timeout || 20_000 })
-        if (!loaded) throw new Error(`Timed out loading ${url}`)
+      return call(
+        'page.goto',
+        {
+          tabId,
+          url: String(url),
+          wait: options.wait,
+          timeout: options.timeout,
+        },
+        { timeoutMs: options.timeout || 20_000 },
+      )
+    },
+
+    async setNextDialogAction(action = 'accept', options = {}) {
+      const tabId = requireSelectedTabId()
+      const opts = typeof action === 'object' && action !== null ? action : options
+      const act = typeof action === 'string'
+        ? action
+        : (typeof action === 'object' && action !== null ? (action.action !== undefined ? action.action : 'accept') : action)
+      if (act !== 'accept' && act !== 'dismiss') {
+        throw new TypeError(`Dialog action must be "accept" or "dismiss", got: ${String(act)}`)
       }
-      return result
+      return call('page.setNextDialogAction', {
+        tabId,
+        action: act,
+        promptText: opts.promptText,
+      })
+    },
+
+    async lastDialog() {
+      const tabId = requireSelectedTabId()
+      return call('page.lastDialog', { tabId })
     },
 
     async info() {

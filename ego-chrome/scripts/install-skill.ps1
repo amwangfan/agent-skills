@@ -15,4 +15,4 @@ if (Test-Path $Destination) {
 Copy-Item -Recurse -Force $Source $Destination
 
 Write-Host "Installed ego-chrome skill to $Destination"
-Write-Host 'Restart Codex so it discovers the skill.'
+Write-Host 'Restart your agent so it discovers the skill.'

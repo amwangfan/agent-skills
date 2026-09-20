@@ -2,6 +2,7 @@ export class RpcClient {
   constructor(config, options = {}) {
     this.config = config
     this.timeoutMs = options.timeoutMs || 20_000
+    this.graceMs = typeof options.graceMs === 'number' ? options.graceMs : undefined
   }
 
   async connect() {
@@ -11,8 +12,22 @@ export class RpcClient {
 
   async request(method, params = {}, options = {}) {
     const timeoutMs = options.timeoutMs || this.timeoutMs
+    const graceMs = typeof options.graceMs === 'number'
+      ? options.graceMs
+      : (typeof this.graceMs === 'number' ? this.graceMs : Math.max(200, Math.min(1_000, Math.round(timeoutMs * 0.1))))
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const timer = setTimeout(() => controller.abort(), timeoutMs + graceMs)
+
+    let onAbort = null
+    if (options.signal) {
+      if (options.signal.aborted) {
+        controller.abort(options.signal.reason)
+      } else {
+        onAbort = () => controller.abort(options.signal.reason)
+        options.signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
+
     try {
       const response = await fetch(`http://${this.config.host}:${this.config.port}/rpc`, {
         method: 'POST',
@@ -20,7 +35,7 @@ export class RpcClient {
           authorization: `Bearer ${this.config.token}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ method, params }),
+        body: JSON.stringify({ method, params, timeoutMs }),
         signal: controller.signal,
       })
       const body = await response.json().catch(() => ({}))
@@ -33,11 +48,17 @@ export class RpcClient {
       return body.result
     } catch (error) {
       if (error?.name === 'AbortError') {
+        if (options.signal?.aborted) {
+          throw (options.signal.reason instanceof Error ? options.signal.reason : new Error(`ego-chrome request aborted: ${method}`))
+        }
         throw new Error(`ego-chrome request timed out: ${method}`)
       }
       throw error
     } finally {
       clearTimeout(timer)
+      if (options.signal && onAbort) {
+        options.signal.removeEventListener('abort', onAbort)
+      }
     }
   }
 

@@ -3,16 +3,16 @@ name: ego-chrome
 description: >-
   Control the user's current Chrome profile through the local ego-chrome extension and CLI. Use for navigation, forms, dynamic interfaces, extraction, and browser testing that benefit from existing login state. Minimize execution rounds and model input: keep predictable work in one invocation, prefer semantic locators and bounded DOM reads, and use compact snapshots only when the state is genuinely unknown.
 metadata:
-  version: "0.2.1"
+  version: "0.2.2"
 ---
 
 # ego-chrome
 
 `ego-chrome` exposes the user's running Chrome profile through a CLI-accessible Node.js runtime. The preloaded `page`, `page.locator(...)`, and `browser` facades use Playwright-style names while reusing the user's current login state.
 
-Run browser work as a PowerShell here-string piped to `ego-chrome nodejs`. Put JavaScript directly in the here-string; do not create a temporary script, import Playwright, launch another browser, or invent helper names.
+Run browser work as a PowerShell here-string or Bash heredoc piped to `ego-chrome nodejs`. Put JavaScript directly in the here-string or heredoc; do not create a temporary script, import Playwright, launch another browser, or invent helper names.
 
-**A here-string is only the JavaScript container; the shell invocation is the execution round. Default to one shell invocation for the whole browser task.** Each `await` is an internal operation, not a step boundary. Before launch, encode every predictable observation, action, wait, extraction, verification, and bounded alternative in the script. Use browser results immediately in JavaScript and keep adapting in-process until the task completes; do not exit merely to inspect intermediate output or plan the next action. Start another command only for required user or external control, or a process-level failure the script cannot recover from.
+**A here-string or heredoc is only the JavaScript container; the shell invocation is the execution round. Default to one shell invocation for the whole browser task.** Each `await` is an internal operation, not a step boundary. Before launch, encode every predictable observation, action, wait, extraction, verification, and bounded alternative in the script. Use browser results immediately in JavaScript and keep adapting in-process until the task completes; do not exit merely to inspect intermediate output or plan the next action. Start another command only for required user or external control, or a process-level failure the script cannot recover from.
 
 **Choose the least-stateful reliable route before inspecting page controls.** When the task specifies an outcome or constraints but not a required interaction, prefer an already-correct state or a known stable URL or site route that directly encodes them; verify the resulting goal state instead of replaying equivalent filters, sorting, or navigation through the UI. Use page controls when the user requested that interaction, the interaction itself is under test, or no reliable equivalent is known. Never invent a brittle route.
 
@@ -132,6 +132,8 @@ Do not stop merely because an ordinary menu, chooser, popup, or dialog opened. C
 ## Execution rules
 
 - `page.url()` is asynchronous; always use `await page.url()`. A `page.waitForURL(...)` predicate receives a `URL` object.
+- `page.goto()` and `browser.openTab()` already wait atomically for document readiness.
+- Native JavaScript dialogs (`alert`, `confirm`, `prompt`) are safely dismissed by default. If acceptance is required, call `await page.setNextDialogAction('accept')` before the action that triggers the dialog; inspect `await page.lastDialog()` afterwards for verification if needed.
 - `page.waitForURL`, `page.waitForLoadState`, `page.waitForSelector`, and locator `waitFor` return a falsy value on timeout. Check the result or immediately verify the required state.
 - Register navigation or result-state waits before the action that triggers them. Prefer state-based waits; use `waitForTimeout` only for brief settling.
 - When page structure is unknown, collect relevant controls or candidates once with `evaluateAll`, `allInnerTexts`, `findText`, or one compact snapshot. Derive the next actions in JavaScript instead of enumerating selector guesses across commands.
@@ -165,6 +167,8 @@ await rows.nth(1).click()
 await page.findText('Continue', { maxResults: 10 })
 await page.clickText('Continue', { exact: true })
 await page.observe({ maxChanges: 20 })
+await page.setNextDialogAction('accept')
+const dialog = await page.lastDialog()
 ```
 
 `taskSpaces` are compatibility labels only in ego-chrome. They do not isolate tabs or sessions. Do not add them to simple tasks.

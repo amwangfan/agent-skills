@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { createConfig, readConfig } from './config.mjs'
 import { RpcClient } from './rpc-client.mjs'
 import { createRuntime } from './semantic-runtime.mjs'
@@ -27,14 +27,31 @@ PowerShell example:
   '@ | ego-chrome
 `
 
-try {
-  process.exitCode = await main(process.argv.slice(2))
-} catch (error) {
-  console.error(error?.stack || error?.message || String(error))
-  process.exitCode = 1
+const EXTENSION_AUTOSTART_WAIT_MS = Number(process.env.EGO_CHROME_AUTOSTART_WAIT_MS) || 20_000
+const EXTENSION_ALREADY_RUNNING_WAIT_MS = Number(process.env.EGO_CHROME_RUNNING_WAIT_MS) || 2_000
+const EXTENSION_POLL_INTERVAL_MS = Number(process.env.EGO_CHROME_POLL_INTERVAL_MS) || 200
+
+const isEntrypoint = () => {
+  if (!process.argv[1]) return false
+  try {
+    const invoked = resolve(process.argv[1]).toLowerCase()
+    const target = fileURLToPath(import.meta.url).toLowerCase()
+    return invoked === target || process.argv[1].endsWith('ego-chrome')
+  } catch {
+    return false
+  }
 }
 
-async function main(argv) {
+if (isEntrypoint()) {
+  try {
+    process.exitCode = await main(process.argv.slice(2))
+  } catch (error) {
+    console.error(error?.stack || error?.message || String(error))
+    process.exitCode = 1
+  }
+}
+
+export async function main(argv) {
   if (argv.includes('-h') || argv.includes('--help')) {
     process.stdout.write(HELP)
     return 0
@@ -92,11 +109,12 @@ async function main(argv) {
   }
 
   const config = await readConfig()
-  await ensureBridge(config)
+  const bridgeInfo = await ensureBridge(config)
   const client = new RpcClient(config)
   try {
     await client.connect()
-    const status = await client.request('bridge.status')
+    const waitTimeoutMs = bridgeInfo?.started ? EXTENSION_AUTOSTART_WAIT_MS : EXTENSION_ALREADY_RUNNING_WAIT_MS
+    const status = await waitForExtension(client, waitTimeoutMs)
     if (status.extension !== 'connected') {
       throw new Error('Chrome extension is not connected. Open Chrome, configure the token, and click the extension icon.')
     }
@@ -112,8 +130,28 @@ async function main(argv) {
   }
 }
 
-async function ensureBridge(config) {
-  if (await canConnect(config)) return
+export async function waitForExtension(client, timeoutMs = 0, intervalMs = EXTENSION_POLL_INTERVAL_MS) {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    try {
+      const status = await client.request('bridge.status')
+      if (status.extension === 'connected') return status
+    } catch {
+      // Continue polling until deadline
+    }
+    if (Date.now() >= deadline) {
+      return (await client.request('bridge.status').catch(() => ({ bridge: 'connected', extension: 'disconnected' })))
+    }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      return (await client.request('bridge.status').catch(() => ({ bridge: 'connected', extension: 'disconnected' })))
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)))
+  }
+}
+
+export async function ensureBridge(config) {
+  if (await canConnect(config)) return { started: false }
 
   const child = spawn(process.execPath, [join(here, 'bridge-process.mjs')], {
     detached: true,
@@ -128,7 +166,7 @@ async function ensureBridge(config) {
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100))
     try {
-      if (await canConnect(config)) return
+      if (await canConnect(config)) return { started: true }
     } catch (error) {
       lastError = error
     }
@@ -136,7 +174,7 @@ async function ensureBridge(config) {
   throw new Error(`Could not start ego-chrome bridge on ${config.host}:${config.port}${lastError ? `: ${lastError.message}` : ''}`)
 }
 
-async function canConnect(config) {
+export async function canConnect(config) {
   const client = new RpcClient(config, { timeoutMs: 1_000 })
   try {
     await client.connect()

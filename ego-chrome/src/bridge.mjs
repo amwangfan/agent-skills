@@ -5,6 +5,14 @@ const EXTENSION_ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const EXTENSION_FRESH_MS = 35_000
 const POLL_TIMEOUT_MS = 25_000
+const MIN_REQUEST_TIMEOUT_MS = 10
+const MAX_REQUEST_TIMEOUT_MS = 300_000
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+
+function clampTimeout(timeout, fallback = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const value = typeof timeout === 'number' && Number.isFinite(timeout) ? timeout : fallback
+  return Math.max(MIN_REQUEST_TIMEOUT_MS, Math.min(MAX_REQUEST_TIMEOUT_MS, Math.round(value)))
+}
 
 export function startBridge(config, options = {}) {
   const logger = options.logger || console
@@ -13,6 +21,13 @@ export function startBridge(config, options = {}) {
   const pollWaiters = new Set()
   let extensionLastSeenAt = 0
   let selectedTabId = null
+
+  function removeFromQueue(id) {
+    const index = queue.findIndex((item) => item.id === id)
+    if (index !== -1) {
+      queue.splice(index, 1)
+    }
+  }
 
   const server = createServer(async (request, response) => {
     try {
@@ -28,7 +43,12 @@ export function startBridge(config, options = {}) {
       }
 
       if (request.method === 'GET' && url.pathname === '/extension/next') {
-        if (queue.length) return json(response, 200, queue.shift())
+        while (queue.length) {
+          const next = queue.shift()
+          if (pending.has(next.id)) {
+            return json(response, 200, next)
+          }
+        }
         const waiter = { response }
         waiter.timer = setTimeout(() => {
           pollWaiters.delete(waiter)
@@ -92,21 +112,30 @@ export function startBridge(config, options = {}) {
         }
 
         const id = randomUUID()
-        const requestMessage = { id, method: message.method, params: message.params || {} }
+        const effectiveTimeoutMs = clampTimeout(message.timeoutMs, options.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS)
+        const requestMessage = {
+          id,
+          method: message.method,
+          params: message.params || {},
+          timeoutMs: effectiveTimeoutMs,
+        }
         const timer = setTimeout(() => {
           const route = pending.get(id)
           if (!route) return
           pending.delete(id)
+          removeFromQueue(id)
           json(route.response, 504, { error: { code: 'EXTENSION_TIMEOUT', message: `Chrome extension timed out: ${message.method}` } })
-        }, options.requestTimeoutMs || 30_000)
+        }, effectiveTimeoutMs)
         pending.set(id, { response, timer })
-        deliver(requestMessage, queue, pollWaiters)
+        deliver(requestMessage, queue, pollWaiters, server)
         response.on('close', () => {
           if (response.writableEnded) return
           const route = pending.get(id)
           if (route?.response === response) {
             clearTimeout(route.timer)
             pending.delete(id)
+            removeFromQueue(id)
+            server.emit('aborted', id)
           }
         })
         return
@@ -126,18 +155,32 @@ export function startBridge(config, options = {}) {
     const address = server.address()
     logger.info?.(`[ego-chrome] bridge listening on http://${config.host}:${address.port}`)
   })
+  server.on('close', () => {
+    for (const waiter of pollWaiters) {
+      clearTimeout(waiter.timer)
+    }
+    pollWaiters.clear()
+    for (const route of pending.values()) {
+      clearTimeout(route.timer)
+    }
+    pending.clear()
+    queue.length = 0
+  })
   return server
 }
 
-function deliver(message, queue, waiters) {
-  const waiter = waiters.values().next().value
-  if (!waiter) {
-    queue.push(message)
-    return
+function deliver(message, queue, waiters, server) {
+  while (waiters.size > 0) {
+    const waiter = waiters.values().next().value
+    waiters.delete(waiter)
+    clearTimeout(waiter.timer)
+    if (!waiter.response.writableEnded && !waiter.response.destroyed) {
+      json(waiter.response, 200, message)
+      return
+    }
   }
-  waiters.delete(waiter)
-  clearTimeout(waiter.timer)
-  json(waiter.response, 200, message)
+  queue.push(message)
+  server?.emit('queued', message)
 }
 
 function authorized(request, expectedToken) {

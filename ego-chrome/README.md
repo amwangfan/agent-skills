@@ -23,19 +23,21 @@ The project is adapted and redesigned from CitroLabs ego-lite's interaction mode
 
 - Reuses current Chrome cookies, site storage, extensions, and logged-in sessions.
 - Opens automation tabs in the background by default.
+- Provides atomic navigation waiting in `page.goto()` and `browser.openTab()`.
+- Safely auto-dismisses native JavaScript dialogs (`alert`, `confirm`, `prompt`) by default, with opt-in acceptance via `page.setNextDialogAction('accept')` and evidence inspection via `page.lastDialog()`.
 - Produces compact semantic snapshots with temporary `@N` references.
 - Clicks and fills elements by snapshot ref or CSS selector.
 - Finds and clicks visible text in dynamic menus and custom elements with a real CDP mouse event.
 - Supports trusted key presses, URL waits, page evaluation, targeted text extraction, selectors, and waits.
 - Requires explicit tab selection before any page operation, preventing accidental takeover of an unrelated tab.
 - Remembers the last automation tab for explicit continuation across CLI invocations while the bridge is running.
-- Includes an installable Codex skill under `skills/ego-chrome`.
+- Includes an installable Agent skill under `skills/ego-chrome`.
 - Does not expose screenshot capture in its default API.
 
 ## Architecture
 
 ```text
-Codex
+Agent / AI Agent
   │
   │ JavaScript piped to ego-chrome
   ▼
@@ -55,15 +57,15 @@ The bridge binds only to `127.0.0.1` and requires a random 256-bit token. The ex
 - Windows 10 or 11.
 - Google Chrome 120 or newer.
 - Node.js 20 or newer.
-- Codex with Agent Skills support.
+- An AI Agent runtime with Agent Skills support (e.g. DeepSeek Harness, Claude Code, Codex).
 
 ## Install
 
 ### 1. Clone and install the CLI
 
 ```powershell
-git clone https://github.com/amwangfan/ego-chrome-extension.git
-cd ego-chrome-extension
+git clone https://github.com/amwangfan/agent-skills.git
+cd agent-skills/ego-chrome
 npm install
 npm link
 ```
@@ -118,7 +120,7 @@ A healthy result resembles:
 }
 ```
 
-### 5. Install the Codex skill
+### 5. Install the Agent skill
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1
@@ -130,7 +132,7 @@ The script copies the skill to:
 ~\.agents\skills\ego-chrome
 ```
 
-Restart Codex after installation. Rerun the script after updating the repository.
+Restart your agent or reload skills after installation. Rerun the script after updating the repository.
 
 ## Upgrade
 
@@ -228,7 +230,7 @@ The snapshot engine uses:
 2. `DOMSnapshot.captureSnapshot` to recover meaningful clickable elements omitted by the accessibility tree;
 3. `backendDOMNodeId` references for actions.
 
-No image is sent to Codex.
+No image is sent to the model or agent.
 
 ## Dynamic menus and text locators
 
@@ -264,11 +266,11 @@ Options:
 - `selector`: restrict candidates to matching ancestors;
 - `maxResults`: cap returned candidate summaries.
 
-## Navigation waits
+## Navigation waits and dialogs
 
-`page.waitForLoadState()` checks the readiness of the current document. It does not prove that a newly triggered navigation has started.
+`page.goto()` and `browser.openTab(url, { wait: true })` wait atomically for document readiness.
 
-For an action expected to navigate, start a URL or result-element wait before the action:
+For an action expected to navigate an already loaded page, start a URL or result-element wait before the action:
 
 ```javascript
 const navigated = page.waitForURL(
@@ -289,6 +291,20 @@ Locator `press()` focuses the element and sends a trusted CDP key event:
 const search = page.locator('textarea[name=q], input[name=q]')
 await search.fill('example')
 await search.press('Enter')
+```
+
+### Native dialogs
+
+Native JavaScript dialogs (`window.alert`, `window.confirm`, `window.prompt`) are handled safely by default: the runtime automatically dismisses them so automation does not hang.
+
+If an upcoming action requires accepting a confirmation or prompt, configure the expected action before triggering it:
+
+```javascript
+await page.setNextDialogAction('accept')
+await page.locator('button#confirm-delete').click()
+
+const dialog = await page.lastDialog()
+console.log(dialog) // { type: 'confirm', message: 'Delete this item?', action: 'accept', ... }
 ```
 
 ## API
@@ -333,6 +349,8 @@ await page.waitForURL(/\/orders\/\d+$/, { timeout: 10000 })
 await page.waitForURL((url) => url.searchParams.get('saved') === '1')
 await page.waitForLoadState({ timeout: 20000 })
 await page.waitForTimeout(250)
+await page.setNextDialogAction('accept')
+await page.lastDialog()
 ```
 
 CSS locator facade:
@@ -358,7 +376,7 @@ Task spaces are optional compatibility labels inside one CLI invocation. They do
 
 The extension controls tabs inside your current Chrome profile, so sites see the same login cookies and storage as your normal tabs.
 
-The project does not export cookies or credentials. Snapshot content and explicit page reads are returned to the local Codex process because Codex needs that information to perform the requested task.
+The project does not export cookies or credentials. Snapshot content and explicit page reads are returned to the local agent process because the agent needs that information to perform the requested task.
 
 Treat the extension's `debugger` permission as sensitive. Rotate the bridge token with:
 
@@ -392,7 +410,7 @@ The page changed after the last snapshot. Take one new snapshot and use the new 
 
 Choose the appropriate explicit browser method. For a new destination, use `browser.openTab()`. For a follow-up command, use `browser.continueLastTab()`.
 
-### Action succeeded but Codex ran extra commands
+### Action succeeded but the agent ran extra commands
 
 Verify the postcondition with `page.waitForURL()` or `page.waitForSelector()` in the same invocation. `page.waitForLoadState()` alone does not prove that an action-triggered navigation occurred.
 
@@ -418,7 +436,7 @@ npm run check
 npm test
 ```
 
-After changing extension files, reload the unpacked extension. After changing the skill, rerun `scripts/install-skill.ps1` and restart Codex.
+After changing extension files, reload the unpacked extension. After changing the skill, rerun `scripts/install-skill.ps1` and restart your agent.
 
 ## Roadmap
 
@@ -426,7 +444,7 @@ After changing extension files, reload the unpacked extension. After changing th
 2. Incremental snapshot diffs.
 3. Tab-group-backed task spaces.
 4. Semantic role and label locators.
-5. Downloads, uploads, dialogs, and network waits.
+5. Downloads, uploads, and network waits.
 6. Explicit visual fallback for exceptional pages, disabled by default.
 
 ## License

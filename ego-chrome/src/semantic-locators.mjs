@@ -81,14 +81,25 @@ async function waitForSemantic(page, query, index, options = {}) {
   const state = options.state || 'attached'
   const deadline = Date.now() + timeout
   while (true) {
-    const matched = await page.evaluate(semanticQueryOperation, { operation: 'state', query, index, state })
-    if (matched) return true
+    try {
+      const matched = await page.evaluate(semanticQueryOperation, { operation: 'state', query, index, state })
+      if (matched) return true
+    } catch (error) {
+      if (!isTransientNavigationError(error)) throw error
+    }
     if (Date.now() >= deadline) return false
     await page.waitForTimeout(100)
   }
 }
 
-function semanticQueryOperation(payload) {
+export function isTransientNavigationError(error) {
+  const message = typeof error === 'string' ? error : error?.message || ''
+  return /Cannot access|No tab|closed|navigation|context|Execution context was destroyed|Execution context destroyed|Inspected target navigated/i.test(
+    message,
+  )
+}
+
+export function semanticQueryOperation(payload) {
   const { operation, query, index = 0, marker, source, arg, state } = payload
 
   const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim()
@@ -117,18 +128,65 @@ function semanticQueryOperation(payload) {
     if (tag === 'option') return 'option'
     if (tag === 'summary') return 'button'
     if (element.isContentEditable) return 'textbox'
+    if (tag === 'dialog') return 'dialog'
+    if (tag === 'table') return 'table'
+    if (tag === 'tr') return 'row'
+    if (tag === 'td') return 'cell'
+    if (tag === 'th') {
+      const scope = element.getAttribute('scope')?.toLowerCase()
+      if (scope === 'row' || scope === 'rowgroup') return 'rowheader'
+      return 'columnheader'
+    }
+    if (tag === 'ul' || tag === 'ol' || tag === 'menu') return 'list'
+    if (tag === 'li') return 'listitem'
+    if (tag === 'nav') return 'navigation'
+    if (tag === 'main') return 'main'
+    if (tag === 'header') return element.closest?.('article, aside, main, nav, section') ? '' : 'banner'
+    if (tag === 'footer') return element.closest?.('article, aside, main, nav, section') ? '' : 'contentinfo'
+    if (tag === 'aside') return 'complementary'
+    if (tag === 'article') return 'article'
+    if (tag === 'img') return element.getAttribute('alt') === '' ? '' : 'img'
+    if (tag === 'progress') return 'progressbar'
     return ''
   }
   const labelledBy = (element) => String(element.getAttribute('aria-labelledby') || '')
     .split(/\s+/)
     .filter(Boolean)
-    .map((id) => document.getElementById(id)?.textContent || '')
+    .map((id) => {
+      const target = document.getElementById(id)
+      return target ? (target.innerText || target.textContent || '') : ''
+    })
+    .filter(Boolean)
     .join(' ')
   const labelsFor = (element) => {
     const labels = element.labels ? Array.from(element.labels) : []
-    const wrapped = element.closest('label')
+    if (element.id) {
+      try {
+        const idSelector = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(element.id) : element.id.replace(/["\\]/g, '\\$&')
+        const explicitLabels = document.querySelectorAll(`label[for="${idSelector}"]`)
+        for (const label of explicitLabels) {
+          if (!labels.includes(label)) labels.push(label)
+        }
+      } catch {
+        const id = element.id
+        const explicitLabels = document.querySelectorAll('label[for]')
+        for (const label of explicitLabels) {
+          if (label.getAttribute('for') === id && !labels.includes(label)) {
+            labels.push(label)
+          }
+        }
+      }
+    }
+    const wrapped = element.closest?.('label')
     if (wrapped && !labels.includes(wrapped)) labels.push(wrapped)
-    return labels.map((label) => label.innerText || label.textContent).join(' ')
+    return labels.map((label) => label.innerText || label.textContent || '').join(' ')
+  }
+  const tableCaption = (element) => {
+    if (element.tagName.toLowerCase() === 'table') {
+      const caption = element.querySelector?.('caption')
+      if (caption) return caption.innerText || caption.textContent || ''
+    }
+    return ''
   }
   const buttonValue = (element) => {
     const tag = element.tagName.toLowerCase()
@@ -136,9 +194,10 @@ function semanticQueryOperation(payload) {
     return tag === 'input' && ['button', 'submit', 'reset'].includes(type) ? element.value : ''
   }
   const accessibleName = (element) => normalize(
-    element.getAttribute('aria-label') ||
-      labelledBy(element) ||
+    labelledBy(element) ||
+      element.getAttribute('aria-label') ||
       labelsFor(element) ||
+      tableCaption(element) ||
       element.getAttribute('alt') ||
       element.getAttribute('title') ||
       element.getAttribute('placeholder') ||
@@ -147,15 +206,18 @@ function semanticQueryOperation(payload) {
       element.textContent,
   )
   const labelName = (element) => normalize(
-    element.getAttribute('aria-label') ||
-      labelledBy(element) ||
+    labelledBy(element) ||
+      element.getAttribute('aria-label') ||
       labelsFor(element) ||
       element.getAttribute('placeholder') ||
       element.getAttribute('title'),
   )
   const isLabelable = (element) => {
     const tag = element.tagName.toLowerCase()
-    return ['input', 'textarea', 'select', 'button'].includes(tag) || element.isContentEditable || ['textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch'].includes(roleOf(element))
+    return ['input', 'textarea', 'select', 'button', 'meter', 'output', 'progress'].includes(tag) ||
+      element.isContentEditable ||
+      tag.includes('-') ||
+      ['textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton', 'listbox'].includes(roleOf(element))
   }
   const matches = (value, matcher) => {
     if (!matcher) return true
@@ -167,9 +229,39 @@ function semanticQueryOperation(payload) {
   }
   const collect = () => {
     const root = document.body || document.documentElement
-    const selector = 'button, a[href], input, textarea, select, option, summary, [role], [contenteditable="true"], h1, h2, h3, h4, h5, h6'
+    const selector = [
+      'button',
+      'a[href]',
+      'input',
+      'textarea',
+      'select',
+      'option',
+      'summary',
+      '[role]',
+      '[contenteditable]:not([contenteditable="false"])',
+      'h1, h2, h3, h4, h5, h6',
+      'dialog',
+      'table',
+      'tr',
+      'td',
+      'th',
+      'ul',
+      'ol',
+      'menu',
+      'li',
+      'nav',
+      'main',
+      'header',
+      'footer',
+      'aside',
+      'article',
+      'img',
+      'progress',
+      '[id]',
+    ].join(', ')
+    const allowHidden = query.includeHidden || (operation === 'state' && (state === 'attached' || state === 'detached'))
     return Array.from(root.querySelectorAll(selector)).filter((element) => {
-      if (!query.includeHidden && !visible(element)) return false
+      if (!allowHidden && !visible(element)) return false
       if (query.kind === 'role') {
         if (roleOf(element) !== query.role) return false
         return matches(accessibleName(element), query.matcher)
