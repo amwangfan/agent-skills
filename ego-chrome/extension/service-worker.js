@@ -262,6 +262,16 @@ async function dispatch(method, params) {
       return snapshotPage(params.tabId, params.options)
     case 'page.click':
       return clickPage(params.tabId, params.target, params.options)
+    case 'page.hover':
+      return hoverPage(params.tabId, params.target, params.options)
+    case 'page.isChecked':
+      return isCheckedPage(params.tabId, params.target)
+    case 'page.setChecked':
+      return setCheckedPage(params.tabId, params.target, params.checked, params.options)
+    case 'page.selectOption':
+      return selectOptionPage(params.tabId, params.target, params.values)
+    case 'page.setInputFiles':
+      return setInputFilesPage(params.tabId, params.target, params.files)
     case 'page.fill':
       return fillPage(params.tabId, params.target, params.value)
     case 'page.press':
@@ -423,9 +433,7 @@ async function pageInfo(tabId) {
   }
 }
 
-async function clickPage(tabId, target, options = {}) {
-  tabId = requireTabId(tabId)
-  const backendNodeId = await resolveTarget(tabId, target)
+async function clickTargetNode(tabId, backendNodeId, options = {}) {
   await sendCommand(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }).catch(() => null)
   const model = await sendCommand(tabId, 'DOM.getBoxModel', { backendNodeId })
   const point = quadCenter(model?.model?.content || model?.model?.border)
@@ -435,6 +443,325 @@ async function clickPage(tabId, target, options = {}) {
   await sendCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button, buttons: buttonMask(button), clickCount })
   await sendCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button, buttons: 0, clickCount })
   return { clicked: true, x: point.x, y: point.y }
+}
+
+async function clickPage(tabId, target, options = {}) {
+  tabId = requireTabId(tabId)
+  const backendNodeId = await resolveTarget(tabId, target)
+  return clickTargetNode(tabId, backendNodeId, options)
+}
+
+async function hoverPage(tabId, target, options = {}) {
+  tabId = requireTabId(tabId)
+  const backendNodeId = await resolveTarget(tabId, target)
+  await sendCommand(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }).catch(() => null)
+  const model = await sendCommand(tabId, 'DOM.getBoxModel', { backendNodeId })
+  const point = quadCenter(model?.model?.content || model?.model?.border)
+  const modifiers = Number(options?.modifiers || 0)
+  await sendCommand(tabId, 'Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: point.x,
+    y: point.y,
+    button: 'none',
+    modifiers,
+  })
+  return { hovered: true, x: point.x, y: point.y }
+}
+
+async function inspectCheckableElement(tabId, backendNodeId) {
+  const objectGroup = 'ego-chrome-check-inspect'
+  try {
+    const resolved = await sendCommand(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup })
+    const objectId = resolved?.object?.objectId
+    if (!objectId) throw rpcError('ELEMENT_NOT_FOUND', 'Could not resolve node')
+    const result = await sendCommand(tabId, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function() {
+        const element = this;
+        const tag = (element.tagName || '').toLowerCase();
+        const type = (element.getAttribute('type') || element.type || '').toLowerCase();
+        const role = (element.getAttribute('role') || '').toLowerCase();
+        const ariaChecked = element.getAttribute('aria-checked');
+        const isNativeCheckbox = tag === 'input' && type === 'checkbox';
+        const isNativeRadio = tag === 'input' && type === 'radio';
+        const isAria = role === 'checkbox' || role === 'switch' || role === 'radio' || ariaChecked !== null;
+
+        if (!isNativeCheckbox && !isNativeRadio && !isAria && typeof element.checked !== 'boolean') {
+          throw new Error('Element is not a checkbox, radio, or switch');
+        }
+
+        let checked = false;
+        if (isNativeCheckbox || isNativeRadio || typeof element.checked === 'boolean') {
+          checked = Boolean(element.checked);
+        } else {
+          checked = ariaChecked === 'true';
+        }
+
+        return {
+          isNativeCheckbox,
+          isNativeRadio,
+          isAria,
+          checked,
+        };
+      }`,
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    throwIfRuntimeException(result)
+    return result?.result?.value
+  } catch (err) {
+    if (/not a checkbox, radio, or switch/i.test(err.message)) {
+      throw rpcError('NOT_CHECKABLE', 'Element is not a checkbox, radio, or switch')
+    }
+    throw err
+  } finally {
+    await sendCommand(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => null)
+  }
+}
+
+async function isCheckedPage(tabId, target) {
+  tabId = requireTabId(tabId)
+  const backendNodeId = await resolveTarget(tabId, target)
+  const info = await inspectCheckableElement(tabId, backendNodeId)
+  return Boolean(info?.checked)
+}
+
+async function setCheckedPage(tabId, target, checked, options = {}) {
+  tabId = requireTabId(tabId)
+  const desiredChecked = Boolean(checked)
+  const backendNodeId = await resolveTarget(tabId, target)
+
+  const info = await inspectCheckableElement(tabId, backendNodeId)
+  if (info.checked === desiredChecked) {
+    return { checked: info.checked, changed: false }
+  }
+
+  if (info.isNativeRadio && info.checked && !desiredChecked) {
+    throw rpcError('CANNOT_UNCHECK_RADIO', 'Cannot uncheck an already checked native radio button')
+  }
+
+  await clickTargetNode(tabId, backendNodeId, options)
+
+  const afterInfo = await inspectCheckableElement(tabId, backendNodeId)
+  if (afterInfo.checked !== desiredChecked) {
+    throw rpcError(
+      'SET_CHECKED_FAILED',
+      `Failed to set checked state to ${desiredChecked}: element remained ${afterInfo.checked}`,
+    )
+  }
+
+  return { checked: afterInfo.checked, changed: true }
+}
+
+function normalizeSelectValues(values) {
+  if (values === undefined || values === null) {
+    throw rpcError('INVALID_OPTIONS', 'Select values cannot be null or undefined')
+  }
+  const list = Array.isArray(values) ? values : [values]
+  return list.map((item) => {
+    if (typeof item === 'string') {
+      return { value: item }
+    }
+    if (typeof item === 'number') {
+      if (!Number.isInteger(item) || item < 0) {
+        throw rpcError('INVALID_OPTIONS', `Option index must be a non-negative integer, got: ${item}`)
+      }
+      return { index: item }
+    }
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const allowedKeys = ['value', 'label', 'index']
+      for (const key of Object.keys(item)) {
+        if (!allowedKeys.includes(key)) {
+          throw rpcError('INVALID_OPTIONS', `Invalid selectOption descriptor key: ${key}`)
+        }
+      }
+      const desc = {}
+      let hasValidField = false
+      if (item.value !== undefined && item.value !== null) {
+        desc.value = String(item.value)
+        hasValidField = true
+      }
+      if (item.label !== undefined && item.label !== null) {
+        desc.label = String(item.label)
+        hasValidField = true
+      }
+      if (item.index !== undefined && item.index !== null) {
+        const idx = Number(item.index)
+        if (!Number.isInteger(idx) || idx < 0) {
+          throw rpcError('INVALID_OPTIONS', `Option index must be a non-negative integer, got: ${item.index}`)
+        }
+        desc.index = idx
+        hasValidField = true
+      }
+      if (!hasValidField) {
+        throw rpcError('INVALID_OPTIONS', 'Descriptor must specify at least one of value, label, or index')
+      }
+      return desc
+    }
+    throw rpcError('INVALID_OPTIONS', `Invalid descriptor item: ${String(item)}`)
+  })
+}
+
+async function selectOptionPage(tabId, target, values) {
+  tabId = requireTabId(tabId)
+  const backendNodeId = await resolveTarget(tabId, target)
+  const descriptors = normalizeSelectValues(values)
+  const objectGroup = 'ego-chrome-select'
+
+  try {
+    const resolved = await sendCommand(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup })
+    const objectId = resolved?.object?.objectId
+    if (!objectId) throw rpcError('ELEMENT_NOT_FOUND', `Could not resolve target: ${target}`)
+
+    const result = await sendCommand(tabId, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function(descriptors) {
+        const element = this;
+        const tag = (element.tagName || '').toLowerCase();
+        if (tag !== 'select') {
+          throw new Error('Target element is not a <select> element');
+        }
+
+        const isMultiple = Boolean(element.multiple);
+        if (!isMultiple && descriptors.length > 1) {
+          throw new Error('Cannot select multiple options on a single-select element');
+        }
+
+        const options = Array.from(element.options);
+        const toSelectIndices = new Set();
+
+        for (const desc of descriptors) {
+          if (!desc || (desc.value === undefined && desc.label === undefined && desc.index === undefined)) {
+            throw new Error('Descriptor must specify at least one of value, label, or index');
+          }
+          if (desc.index !== undefined && (!Number.isInteger(desc.index) || desc.index < 0)) {
+            throw new Error('Option index must be a non-negative integer');
+          }
+
+          let matched = false;
+          for (let i = 0; i < options.length; i++) {
+            const opt = options[i];
+            let matches = true;
+            if (desc.index !== undefined) {
+              if (i !== desc.index) matches = false;
+            }
+            if (matches && desc.value !== undefined) {
+              if (opt.value !== desc.value) matches = false;
+            }
+            if (matches && desc.label !== undefined) {
+              const labelStr = desc.label.trim();
+              const optText = (opt.text || '').trim();
+              const optLabel = (opt.label || '').trim();
+              if (optText !== labelStr && optLabel !== labelStr) matches = false;
+            }
+            if (matches) {
+              toSelectIndices.add(i);
+              matched = true;
+              if (!isMultiple) break;
+            }
+          }
+          if (!matched) {
+            throw new Error('Option not found for descriptor: ' + JSON.stringify(desc));
+          }
+        }
+
+        let changed = false;
+        for (let i = 0; i < options.length; i++) {
+          const opt = options[i];
+          const shouldSelect = toSelectIndices.has(i);
+          if (opt.selected !== shouldSelect) {
+            opt.selected = shouldSelect;
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        return Array.from(element.selectedOptions).map((opt) => opt.value);
+      }`,
+      arguments: [{ value: descriptors }],
+      returnByValue: true,
+      awaitPromise: true,
+    })
+
+    throwIfRuntimeException(result)
+    return Array.isArray(result?.result?.value) ? result.result.value : []
+  } catch (err) {
+    if (/not a <select>/i.test(err.message)) {
+      throw rpcError('NOT_SELECT_ELEMENT', err.message)
+    }
+    if (/option not found/i.test(err.message)) {
+      throw rpcError('OPTION_NOT_FOUND', err.message)
+    }
+    if (/cannot select multiple|descriptor must specify|non-negative integer|invalid descriptor/i.test(err.message)) {
+      throw rpcError('INVALID_OPTIONS', err.message)
+    }
+    throw err
+  } finally {
+    await sendCommand(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => null)
+  }
+}
+
+async function setInputFilesPage(tabId, target, files) {
+  tabId = requireTabId(tabId)
+  const backendNodeId = await resolveTarget(tabId, target)
+
+  let fileList = []
+  if (Array.isArray(files)) {
+    for (const item of files) {
+      if (typeof item !== 'string' || !item.trim()) {
+        throw rpcError('INVALID_FILES', 'Each file in files must be a non-empty string path')
+      }
+      fileList.push(item)
+    }
+  } else if (typeof files === 'string') {
+    if (!files.trim()) {
+      throw rpcError('INVALID_FILES', 'File path must be a non-empty string')
+    }
+    fileList = [files]
+  } else {
+    throw rpcError('INVALID_FILES', 'files parameter must be a file path string or array of paths')
+  }
+
+  const objectGroup = 'ego-chrome-files'
+  try {
+    const resolved = await sendCommand(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup })
+    const objectId = resolved?.object?.objectId
+    if (!objectId) throw rpcError('ELEMENT_NOT_FOUND', `Could not resolve target: ${target}`)
+
+    const checkResult = await sendCommand(tabId, 'Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function() {
+        const element = this;
+        const tag = (element.tagName || '').toLowerCase();
+        const type = (element.getAttribute('type') || element.type || '').toLowerCase();
+        if (tag !== 'input' || type !== 'file') {
+          throw new Error('Target element is not an input[type=file]');
+        }
+        return true;
+      }`,
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    throwIfRuntimeException(checkResult)
+  } catch (err) {
+    if (/not an input\[type=file\]/i.test(err.message)) {
+      throw rpcError('INVALID_TARGET', 'Target element is not an input[type=file]')
+    }
+    throw err
+  } finally {
+    await sendCommand(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => null)
+  }
+
+  await sendCommand(tabId, 'DOM.setFileInputFiles', {
+    files: fileList,
+    backendNodeId,
+  })
+
+  return { count: fileList.length }
 }
 
 async function fillPage(tabId, target, value) {
@@ -518,12 +845,62 @@ async function resolveTarget(tabId, target) {
     if (!ref) throw rpcError('STALE_REF', `Unknown or stale ref ${value}; call page.snapshot() again`)
     return ref.backendNodeId
   }
-  const document = await sendCommand(tabId, 'DOM.getDocument', { depth: 1, pierce: true })
-  const queried = await sendCommand(tabId, 'DOM.querySelector', { nodeId: document.root.nodeId, selector: value })
-  if (!queried.nodeId) throw rpcError('ELEMENT_NOT_FOUND', `Element not found: ${value}`)
-  const described = await sendCommand(tabId, 'DOM.describeNode', { nodeId: queried.nodeId })
-  const backendNodeId = described?.node?.backendNodeId
-  if (!backendNodeId) throw rpcError('ELEMENT_NOT_FOUND', `Element has no backend node: ${value}`)
+
+  // Fast path: DOM.querySelector
+  let backendNodeId = null
+  try {
+    const document = await sendCommand(tabId, 'DOM.getDocument', { depth: 1, pierce: true })
+    if (document?.root?.nodeId) {
+      const queried = await sendCommand(tabId, 'DOM.querySelector', { nodeId: document.root.nodeId, selector: value })
+      if (queried?.nodeId) {
+        const described = await sendCommand(tabId, 'DOM.describeNode', { nodeId: queried.nodeId })
+        backendNodeId = described?.node?.backendNodeId || null
+      }
+    }
+  } catch {
+    // Fall back to shadow search
+  }
+
+  if (backendNodeId) return backendNodeId
+
+  // Fallback: search open shadow roots recursively via Runtime.evaluate
+  const objectGroup = 'ego-chrome-resolve'
+  try {
+    const response = await sendCommand(tabId, 'Runtime.evaluate', {
+      expression: `((selector) => {
+        function search(root) {
+          try {
+            const el = root.querySelector(selector);
+            if (el) return el;
+          } catch {}
+          const all = root.querySelectorAll('*');
+          for (let i = 0; i < all.length; i++) {
+            const shadow = all[i].shadowRoot;
+            if (shadow) {
+              const found = search(shadow);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+        return search(document);
+      })(${JSON.stringify(value)})`,
+      objectGroup,
+      returnByValue: false,
+    })
+    throwIfRuntimeException(response)
+    const objectId = response?.result?.objectId
+    if (objectId && response?.result?.type !== 'undefined' && response?.result?.subtype !== 'null') {
+      const described = await sendCommand(tabId, 'DOM.describeNode', { objectId })
+      backendNodeId = described?.node?.backendNodeId || null
+    }
+  } finally {
+    await sendCommand(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => null)
+  }
+
+  if (!backendNodeId) {
+    throw rpcError('ELEMENT_NOT_FOUND', `Element not found: ${value}`)
+  }
   return backendNodeId
 }
 
@@ -839,4 +1216,11 @@ export {
   backgroundStateByTab,
   originalDiscardabilityByTab,
   dispatch,
+  hoverPage,
+  isCheckedPage,
+  setCheckedPage,
+  selectOptionPage,
+  normalizeSelectValues,
+  setInputFilesPage,
+  resolveTarget,
 }

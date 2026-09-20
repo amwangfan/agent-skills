@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRuntime } from '../src/semantic-runtime.mjs'
-import { semanticQueryOperation, isTransientNavigationError } from '../src/semantic-locators.mjs'
+import { createSemanticLocator, semanticQueryOperation, isTransientNavigationError } from '../src/semantic-locators.mjs'
 
 function createMockRuntime() {
   const calls = []
@@ -17,10 +17,71 @@ function createMockRuntime() {
       }
       if (method === 'page.fill') return { filled: true }
       if (method === 'page.click') return { clicked: true }
+      if (method === 'page.hover') return { hovered: true }
+      if (method === 'page.setChecked') return { checked: params.checked }
+      if (method === 'page.isChecked') return true
+      if (method === 'page.selectOption') return ['val1']
+      if (method === 'page.setInputFiles') return { set: true }
       throw new Error(`unexpected method ${method}`)
     },
   }
   return { runtime: createRuntime(rpc), calls }
+}
+
+function createMockShadowRoot({ host = null, children = [], mode = 'open' } = {}) {
+  const shadowRoot = {
+    nodeType: 11,
+    mode,
+    host,
+    children: [...children],
+    getRootNode(options = {}) {
+      if (options.composed && this.host && typeof this.host.getRootNode === 'function') {
+        return this.host.getRootNode(options)
+      }
+      return this
+    },
+    getElementById(id) {
+      const walk = (curr) => {
+        if (!curr) return null
+        if (curr.id === id) return curr
+        for (const c of curr.children || []) {
+          const found = walk(c)
+          if (found) return found
+        }
+        return null
+      }
+      for (const child of this.children) {
+        const found = walk(child)
+        if (found) return found
+      }
+      return null
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null
+    },
+    querySelectorAll(selector) {
+      const result = []
+      const selParts = selector.split(',').map((s) => s.trim())
+      const walk = (curr) => {
+        for (const child of curr.children || []) {
+          for (const sel of selParts) {
+            if (matchesSimpleSelector(child, sel)) {
+              if (!result.includes(child)) result.push(child)
+              break
+            }
+          }
+          walk(child)
+        }
+      }
+      walk(this)
+      return result
+    },
+  }
+  for (const c of shadowRoot.children) {
+    c.parentElement = null
+    c.parentNode = shadowRoot
+  }
+  return shadowRoot
 }
 
 function createMockNode({
@@ -35,19 +96,45 @@ function createMockNode({
   style = {},
   isContentEditable = false,
   clientRects = [{ width: 100, height: 20 }],
+  shadowRoot = null,
 }) {
   const attrs = new Map(Object.entries(attributes))
   if (id) attrs.set('id', id)
   const node = {
+    nodeType: 1,
     tagName: tag.toUpperCase(),
     id,
     labels,
     innerText,
     textContent: textContent || innerText,
     parentElement: parent,
+    parentNode: parent,
     children: [...children],
     style: { display: 'block', visibility: 'visible', opacity: '1', ...style },
     isContentEditable,
+    shadowRoot,
+    focus() {
+      this.focused = true
+    },
+    attachShadow({ mode = 'open' } = {}) {
+      const root = createMockShadowRoot({ host: this, mode })
+      if (mode === 'open') {
+        this.shadowRoot = root
+      } else {
+        this.shadowRoot = null
+      }
+      return root
+    },
+    getRootNode(options = {}) {
+      if (this.parentElement) return this.parentElement.getRootNode(options)
+      if (this.parentNode) {
+        if (typeof this.parentNode.getRootNode === 'function') {
+          return this.parentNode.getRootNode(options)
+        }
+        return this.parentNode
+      }
+      return globalThis.document || this
+    },
     getAttribute(name) {
       return attrs.has(name) ? attrs.get(name) : null
     },
@@ -62,6 +149,11 @@ function createMockNode({
     },
     getClientRects() {
       if (this.style.display === 'none' || this.style.visibility === 'hidden') return []
+      let curr = this.parentElement || this.parentNode
+      while (curr) {
+        if (curr.style && (curr.style.display === 'none' || curr.style.visibility === 'hidden')) return []
+        curr = curr.parentElement || curr.parentNode || curr.host
+      }
       return clientRects
     },
     closest(selector) {
@@ -97,9 +189,20 @@ function createMockNode({
       walk(this)
       return result
     },
+    matches(selector) {
+      const selParts = selector.split(',').map((s) => s.trim())
+      return selParts.some((sel) => matchesSimpleSelector(this, sel))
+    },
   }
   for (const c of node.children) {
     c.parentElement = node
+    c.parentNode = node
+  }
+  if (shadowRoot) {
+    shadowRoot.host = node
+  }
+  if (typeof globalThis.Element === 'function') {
+    Object.setPrototypeOf(node, globalThis.Element.prototype)
   }
   return node
 }
@@ -113,6 +216,13 @@ function matchesSimpleSelector(element, selector) {
     return element.tagName === 'LABEL' && element.getAttribute('for') === id
   }
   if (s === 'label[for]') return element.tagName === 'LABEL' && element.hasAttribute('for')
+  if (s.startsWith('[data-ego-chrome-semantic-target')) {
+    if (s.includes('=')) {
+      const match = s.match(/\[data-ego-chrome-semantic-target=["']?([^"']+)["']?\]/)
+      return element.getAttribute('data-ego-chrome-semantic-target') === (match ? match[1] : '')
+    }
+    return element.hasAttribute('data-ego-chrome-semantic-target')
+  }
   if (s.startsWith('[contenteditable')) return element.isContentEditable
   if (s.startsWith('a[href]')) return element.tagName === 'A' && element.hasAttribute('href')
   return element.tagName === s.toUpperCase()
@@ -121,8 +231,12 @@ function matchesSimpleSelector(element, selector) {
 function setupMockDom(root) {
   const allNodes = []
   const collectAll = (n) => {
+    if (!n) return
     allNodes.push(n)
-    for (const c of n.children) collectAll(c)
+    if (n.shadowRoot) {
+      for (const c of n.shadowRoot.children || []) collectAll(c)
+    }
+    for (const c of n.children || []) collectAll(c)
   }
   collectAll(root)
 
@@ -132,10 +246,20 @@ function setupMockDom(root) {
   }
 
   const doc = {
+    nodeType: 9,
     body: root,
     documentElement: root,
     getElementById(id) {
-      return allNodes.find((n) => n.id === id) || null
+      const walk = (curr) => {
+        if (!curr) return null
+        if (curr.id === id) return curr
+        for (const c of curr.children || []) {
+          const found = walk(c)
+          if (found) return found
+        }
+        return null
+      }
+      return walk(root)
     },
     querySelectorAll(selector) {
       return root.querySelectorAll(selector)
@@ -143,7 +267,12 @@ function setupMockDom(root) {
     querySelector(selector) {
       return root.querySelector(selector)
     },
+    getRootNode() {
+      return doc
+    },
   }
+
+  root.parentNode = doc
 
   const prevDoc = globalThis.document
   const prevStyle = globalThis.getComputedStyle
@@ -450,4 +579,266 @@ test('locator.waitFor does not retry non-transient errors', async () => {
     /Non-transient failure in locator/,
   )
   assert.equal(evaluateAttempts, 1, 'should fail immediately on non-transient error')
+})
+
+test('getByRole finds button inside open shadowRoot by role and accessible name', () => {
+  const shadowBtn = createMockNode({ tag: 'button', innerText: 'Shadow Submit' })
+  const shadow = createMockShadowRoot({ children: [shadowBtn] })
+  const host = createMockNode({ tag: 'my-element', shadowRoot: shadow })
+  const root = createMockNode({ tag: 'body', children: [host] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const count = semanticQueryOperation({
+      operation: 'count',
+      query: { kind: 'role', role: 'button', matcher: { kind: 'text', value: 'Shadow Submit', exact: true } },
+    })
+    assert.equal(count, 1, 'button inside shadowRoot should be found by role and name')
+  } finally {
+    teardown()
+  }
+})
+
+test('accessible name prefers aria-labelledby inside shadowRoot over document ID', () => {
+  const docLabel = createMockNode({ tag: 'span', id: 'label-id', innerText: 'Doc Label' })
+  const shadowLabel = createMockNode({ tag: 'span', id: 'label-id', innerText: 'Shadow Label' })
+  const shadowBtn = createMockNode({
+    tag: 'button',
+    attributes: { 'aria-labelledby': 'label-id' },
+    innerText: 'Button',
+  })
+  const shadow = createMockShadowRoot({ children: [shadowLabel, shadowBtn] })
+  const host = createMockNode({ tag: 'my-card', shadowRoot: shadow })
+  const root = createMockNode({ tag: 'body', children: [docLabel, host] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const countShadow = semanticQueryOperation({
+      operation: 'count',
+      query: { kind: 'role', role: 'button', matcher: { kind: 'text', value: 'Shadow Label', exact: true } },
+    })
+    assert.equal(countShadow, 1, 'aria-labelledby must resolve to shadow local id first')
+
+    const countDoc = semanticQueryOperation({
+      operation: 'count',
+      query: { kind: 'role', role: 'button', matcher: { kind: 'text', value: 'Doc Label', exact: true } },
+    })
+    assert.equal(countDoc, 0, 'aria-labelledby should not resolve to doc when shadow has id')
+  } finally {
+    teardown()
+  }
+})
+
+test('getByLabel associates label[for] inside open shadowRoot and prioritizes over document', () => {
+  const docLabel = createMockNode({ tag: 'label', attributes: { for: 'email-field' }, innerText: 'Global Email' })
+  const shadowLabel = createMockNode({ tag: 'label', attributes: { for: 'email-field' }, innerText: 'Shadow Email' })
+  const shadowInput = createMockNode({ tag: 'input', id: 'email-field', attributes: { type: 'text' } })
+  const shadow = createMockShadowRoot({ children: [shadowLabel, shadowInput] })
+  const host = createMockNode({ tag: 'user-form', shadowRoot: shadow })
+  const root = createMockNode({ tag: 'body', children: [docLabel, host] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const countShadow = semanticQueryOperation({
+      operation: 'count',
+      query: { kind: 'label', matcher: { kind: 'text', value: 'Shadow Email', exact: true } },
+    })
+    assert.equal(countShadow, 1, 'input should associate with shadow label')
+
+    const countGlobal = semanticQueryOperation({
+      operation: 'count',
+      query: { kind: 'label', matcher: { kind: 'text', value: 'Global Email', exact: true } },
+    })
+    assert.equal(countGlobal, 0, 'shadow input should not associate with document label when shadow label exists')
+  } finally {
+    teardown()
+  }
+})
+
+test('candidates across multiple shadow roots maintain depth-first DOM order', () => {
+  const btn1 = createMockNode({ tag: 'button', innerText: 'Button 1' })
+  const shadow1 = createMockShadowRoot({ children: [btn1] })
+  const host1 = createMockNode({ tag: 'host-one', shadowRoot: shadow1 })
+
+  const nestedBtn = createMockNode({ tag: 'button', innerText: 'Nested Button' })
+  const nestedShadow = createMockShadowRoot({ children: [nestedBtn] })
+  const nestedHost = createMockNode({ tag: 'nested-host', shadowRoot: nestedShadow })
+  shadow1.children.push(nestedHost)
+  nestedHost.parentNode = shadow1
+
+  const btn2 = createMockNode({ tag: 'button', innerText: 'Button 2' })
+  const shadow2 = createMockShadowRoot({ children: [btn2] })
+  const host2 = createMockNode({ tag: 'host-two', shadowRoot: shadow2 })
+
+  const lightBtn = createMockNode({ tag: 'button', innerText: 'Light Button' })
+
+  const root = createMockNode({ tag: 'body', children: [host1, host2, lightBtn] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const texts = semanticQueryOperation({
+      operation: 'allInnerTexts',
+      query: { kind: 'role', role: 'button' },
+    })
+    assert.deepEqual(texts, ['Button 1', 'Nested Button', 'Button 2', 'Light Button'])
+  } finally {
+    teardown()
+  }
+})
+
+test('semantic locator delegates action methods to page with marker target', async () => {
+  const calls = []
+  const mockPage = {
+    async evaluate(fn, arg) {
+      if (arg?.operation === 'count') return 1
+      if (arg?.operation === 'mark') return { found: true, count: 1 }
+      if (arg?.operation === 'unmark') return true
+      return true
+    },
+    async hover(target, options) {
+      calls.push({ action: 'hover', target, options })
+      return { hovered: true }
+    },
+    async check(target, options) {
+      calls.push({ action: 'check', target, options })
+      return { checked: true }
+    },
+    async uncheck(target, options) {
+      calls.push({ action: 'uncheck', target, options })
+      return { unchecked: true }
+    },
+    async setChecked(target, checked, options) {
+      calls.push({ action: 'setChecked', target, checked, options })
+      return { checked, changed: true }
+    },
+    async isChecked(target) {
+      calls.push({ action: 'isChecked', target })
+      return true
+    },
+    async selectOption(target, values) {
+      calls.push({ action: 'selectOption', target, values })
+      return ['val1']
+    },
+    async setInputFiles(target, files) {
+      calls.push({ action: 'setInputFiles', target, files })
+      return { count: files.length }
+    },
+  }
+
+  const locator = createSemanticLocator(mockPage, { kind: 'role', role: 'button' })
+
+  await locator.hover({ force: true })
+  assert.equal(calls[0].action, 'hover')
+  assert.match(calls[0].target, /data-ego-chrome-semantic-target/)
+  assert.deepEqual(calls[0].options, { force: true })
+
+  await locator.check({ force: true })
+  assert.equal(calls[1].action, 'check')
+  assert.match(calls[1].target, /data-ego-chrome-semantic-target/)
+  assert.deepEqual(calls[1].options, { force: true })
+
+  await locator.uncheck()
+  assert.equal(calls[2].action, 'uncheck')
+  assert.match(calls[2].target, /data-ego-chrome-semantic-target/)
+
+  await locator.setChecked(false, { force: true })
+  assert.equal(calls[3].action, 'setChecked')
+  assert.match(calls[3].target, /data-ego-chrome-semantic-target/)
+  assert.equal(calls[3].checked, false)
+  assert.deepEqual(calls[3].options, { force: true })
+
+  const checked = await locator.isChecked()
+  assert.equal(checked, true)
+  assert.equal(calls[4].action, 'isChecked')
+
+  const selected = await locator.selectOption('blue')
+  assert.deepEqual(selected, ['val1'])
+  assert.equal(calls[5].action, 'selectOption')
+  assert.equal(calls[5].values, 'blue')
+
+  const uploaded = await locator.setInputFiles(['file.txt'])
+  assert.deepEqual(uploaded, { count: 1 })
+  assert.equal(calls[6].action, 'setInputFiles')
+  assert.deepEqual(calls[6].files, ['file.txt'])
+})
+
+test('marker is cleaned up from element inside shadowRoot after action without document.querySelector', async () => {
+  const shadowBtn = createMockNode({ tag: 'button', innerText: 'Shadow Action' })
+  const shadow = createMockShadowRoot({ children: [shadowBtn] })
+  const host = createMockNode({ tag: 'my-host', shadowRoot: shadow })
+  const root = createMockNode({ tag: 'body', children: [host] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const page = {
+      async evaluate(fn, arg) {
+        if (typeof fn === 'function') {
+          return fn(arg)
+        }
+        return (0, eval)(`(${fn})`)(arg)
+      },
+      async click(target) {
+        assert.ok(shadowBtn.hasAttribute('data-ego-chrome-semantic-target'), 'marker must be set on shadow element')
+        return { clicked: true }
+      },
+    }
+
+    const locator = createSemanticLocator(page, {
+      kind: 'role',
+      role: 'button',
+      matcher: { kind: 'text', value: 'Shadow Action', exact: true },
+    })
+    await locator.click()
+
+    assert.equal(shadowBtn.hasAttribute('data-ego-chrome-semantic-target'), false, 'marker must be removed from shadow element after action')
+  } finally {
+    teardown()
+  }
+})
+
+test('waitFor state attached, visible, hidden, detached works inside shadowRoot', () => {
+  const visibleBtn = createMockNode({ tag: 'button', innerText: 'Visible Shadow' })
+  const hiddenBtn = createMockNode({ tag: 'button', innerText: 'Hidden Shadow', style: { display: 'none' } })
+  const shadow = createMockShadowRoot({ children: [visibleBtn, hiddenBtn] })
+  const host = createMockNode({ tag: 'my-host', shadowRoot: shadow })
+  const root = createMockNode({ tag: 'body', children: [host] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const queryVisible = { kind: 'role', role: 'button', matcher: { kind: 'text', value: 'Visible Shadow', exact: true } }
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryVisible, state: 'attached' }), true, 'attached for visible shadow')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryVisible, state: 'visible' }), true, 'visible for visible shadow')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryVisible, state: 'hidden' }), false, 'hidden is false for visible shadow')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryVisible, state: 'detached' }), false, 'detached is false for visible shadow')
+
+    const queryHidden = { kind: 'role', role: 'button', matcher: { kind: 'text', value: 'Hidden Shadow', exact: true } }
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryHidden, state: 'attached' }), true, 'attached for hidden shadow')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryHidden, state: 'visible' }), false, 'visible is false for hidden shadow')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryHidden, state: 'hidden' }), true, 'hidden is true for hidden shadow')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryHidden, state: 'detached' }), false, 'detached is false for hidden shadow')
+
+    const queryNonExistent = { kind: 'role', role: 'button', matcher: { kind: 'text', value: 'Nonexistent Shadow', exact: true } }
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryNonExistent, state: 'detached' }), true, 'detached for non-existent')
+    assert.equal(semanticQueryOperation({ operation: 'state', query: queryNonExistent, state: 'attached' }), false, 'not attached for non-existent')
+  } finally {
+    teardown()
+  }
+})
+
+test('closed shadowRoot is explicitly not supported and ignored', () => {
+  const closedHost = createMockNode({ tag: 'closed-host' })
+  closedHost.attachShadow({ mode: 'closed' })
+  assert.equal(closedHost.shadowRoot, null)
+  const root = createMockNode({ tag: 'body', children: [closedHost] })
+  const teardown = setupMockDom(root)
+
+  try {
+    const count = semanticQueryOperation({
+      operation: 'count',
+      query: { kind: 'role', role: 'button' },
+    })
+    assert.equal(count, 0)
+  } finally {
+    teardown()
+  }
 })

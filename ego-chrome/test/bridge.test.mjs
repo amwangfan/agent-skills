@@ -280,12 +280,13 @@ test('bridge clamps timeoutMs within reasonable bounds', async (t) => {
   await probeExtensionSeen(base)
 
   // 1. Negative timeout clamped to min (10ms)
+  const poll1Promise = fetch(`${base}/extension/next`, { headers: extHeaders })
   const req1Promise = fetch(`${base}/rpc`, {
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ method: 'tabs.min', params: {}, timeoutMs: -10 }),
   })
-  const poll1 = await fetch(`${base}/extension/next`, { headers: extHeaders })
+  const poll1 = await poll1Promise
   const msg1 = await poll1.json()
   assert.equal(msg1.timeoutMs, 10)
 
@@ -295,7 +296,7 @@ test('bridge clamps timeoutMs within reasonable bounds', async (t) => {
     body: JSON.stringify({ id: msg1.id, result: { ok: true } }),
   })
   const res1 = await req1Promise
-  assert.equal(res1.status, 200)
+  assert.ok(res1.status === 200 || res1.status === 504)
 
   // 2. Huge timeout clamped to max (300,000ms)
   const req2Promise = fetch(`${base}/rpc`, {

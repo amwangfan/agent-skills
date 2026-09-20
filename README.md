@@ -31,6 +31,7 @@
   - **复用个人登录态**：免去账号密码、二次验证或验证码困扰，直接继承当前浏览器的 Cookies、LocalStorage 与登录 Session；
   - **超低 Token 语义快照**：通过无障碍树与精简 DOM 抽取结构化文本快照，避免多模态截图带来的高昂 Token 开销与延迟；
   - **智能弹窗与原子化等待**：支持原生 JS 弹窗（alert/confirm/prompt）安全自动关闭与预设动作处理，页面跳转与打开标签页原子化等待就绪；
+  - **表单与高级交互 (v0.3.0)**：支持幂等表单控制（`check`/`uncheck`/`isChecked`）、下拉选择（`selectOption`）、鼠标悬停（`hover`）、本地文件上传（`setInputFiles`）与 Open Shadow DOM 递归穿透；
   - **Playwright 风格操作**：通过 `ego-chrome nodejs` 支持链式或语义选择器（Role、Label、Text、CSS）操控页面。
 
 ---

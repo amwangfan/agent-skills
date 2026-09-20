@@ -1,4 +1,10 @@
-import { createRuntime as createBaseRuntime } from './runtime.mjs'
+import {
+  createRuntime as createBaseRuntime,
+  deepQueryAll,
+  deepQueryOne,
+  evaluateWithDeepQuery,
+  isTransientNavigationError,
+} from './runtime.mjs'
 
 const SNAPSHOT_DEFAULTS = {
   compact: { maxChars: 3_500, includeText: false },
@@ -93,14 +99,35 @@ function createLowTokenLocator(page, baseLocator, selector, index = null) {
     fill: (value, options) => index === null
       ? fallback.fill(value, options)
       : withIndexedTarget(page, selector, index, (target) => page.fill(target, value, options)),
+    hover: (options) => index === null
+      ? fallback.hover(options)
+      : withIndexedTarget(page, selector, index, (target) => page.hover(target, options)),
+    check: (options) => index === null
+      ? fallback.check(options)
+      : withIndexedTarget(page, selector, index, (target) => page.check(target, options)),
+    uncheck: (options) => index === null
+      ? fallback.uncheck(options)
+      : withIndexedTarget(page, selector, index, (target) => page.uncheck(target, options)),
+    setChecked: (checked, options) => index === null
+      ? fallback.setChecked(checked, options)
+      : withIndexedTarget(page, selector, index, (target) => page.setChecked(target, checked, options)),
+    isChecked: () => index === null
+      ? fallback.isChecked()
+      : withIndexedTarget(page, selector, index, (target) => page.isChecked(target)),
+    selectOption: (values) => index === null
+      ? fallback.selectOption(values)
+      : withIndexedTarget(page, selector, index, (target) => page.selectOption(target, values)),
+    setInputFiles: (files) => index === null
+      ? fallback.setInputFiles(files)
+      : withIndexedTarget(page, selector, index, (target) => page.setInputFiles(target, files)),
     press: (key, options) => index === null
       ? fallback.press(key, options)
       : withIndexedTarget(page, selector, index, async (target) => {
-          await page.evaluate((value) => {
-            const element = document.querySelector(value)
+          await page.evaluate(evaluateWithDeepQuery(({ target: value }) => {
+            const element = deepQueryOne(value)
             if (!element) throw new Error(`Element not found: ${value}`)
             element.focus()
-          }, target)
+          }, { target }))
           return page.press(key, options)
         }),
     count: () => page.count(selector),
@@ -114,17 +141,17 @@ function createLowTokenLocator(page, baseLocator, selector, index = null) {
       const style = getComputedStyle(element)
       return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0
     }),
-    allInnerTexts: () => page.evaluate((value) =>
-      Array.from(document.querySelectorAll(value)).map((element) => element.innerText), selector),
-    allTextContents: () => page.evaluate((value) =>
-      Array.from(document.querySelectorAll(value)).map((element) => element.textContent), selector),
+    allInnerTexts: () => page.evaluate(evaluateWithDeepQuery(({ selector }) =>
+      deepQueryAll(selector).map((element) => element.innerText), { selector })),
+    allTextContents: () => page.evaluate(evaluateWithDeepQuery(({ selector }) =>
+      deepQueryAll(selector).map((element) => element.textContent), { selector })),
     evaluate: (fn, arg) => evaluateIndexed(page, selector, index, fn, arg),
-    evaluateAll: (fn, arg) => page.evaluate(({ selector, source, arg }) =>
-      (0, eval)(`(${source})`)(Array.from(document.querySelectorAll(selector)), arg), {
+    evaluateAll: (fn, arg) => page.evaluate(evaluateWithDeepQuery(({ selector, source, arg }) =>
+      (0, eval)(`(${source})`)(deepQueryAll(selector), arg), {
         selector,
         source: fn.toString(),
         arg,
-      }),
+      })),
     waitFor: (options) => index === null
       ? fallback.waitFor(options)
       : waitForIndexed(page, selector, index, options),
@@ -133,14 +160,14 @@ function createLowTokenLocator(page, baseLocator, selector, index = null) {
 
 async function withIndexedTarget(page, selector, index, action) {
   const marker = `ego-index-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  const selected = await page.evaluate(({ selector, index, marker }) => {
-    const nodes = Array.from(document.querySelectorAll(selector))
+  const selected = await page.evaluate(evaluateWithDeepQuery(({ selector, index, marker }) => {
+    const nodes = deepQueryAll(selector)
     const resolved = index < 0 ? nodes.length + index : index
     const element = nodes[resolved]
     if (!element) return { found: false, count: nodes.length }
     element.setAttribute('data-ego-chrome-index-target', marker)
     return { found: true, count: nodes.length }
-  }, { selector, index, marker })
+  }, { selector, index, marker }))
 
   if (!selected.found) {
     throw new Error(`Locator index not found: ${selector}; count=${selected.count}; index=${index}`)
@@ -149,20 +176,20 @@ async function withIndexedTarget(page, selector, index, action) {
   try {
     return await action(`[data-ego-chrome-index-target="${marker}"]`)
   } finally {
-    await page.evaluate((value) => {
-      document.querySelector(`[data-ego-chrome-index-target="${value}"]`)?.removeAttribute('data-ego-chrome-index-target')
-    }, marker).catch(() => {})
+    await page.evaluate(evaluateWithDeepQuery(({ marker }) => {
+      deepQueryOne(`[data-ego-chrome-index-target="${marker}"]`)?.removeAttribute('data-ego-chrome-index-target')
+    }, { marker })).catch(() => {})
   }
 }
 
 async function evaluateIndexed(page, selector, index, fn, arg) {
-  return page.evaluate(({ selector, index, source, arg }) => {
-    const nodes = Array.from(document.querySelectorAll(selector))
+  return page.evaluate(evaluateWithDeepQuery(({ selector, index, source, arg }) => {
+    const nodes = deepQueryAll(selector)
     const resolved = index === null ? 0 : index < 0 ? nodes.length + index : index
     const element = nodes[resolved]
     if (!element) throw new Error(`Element not found: ${selector}; index=${resolved}`)
     return (0, eval)(`(${source})`)(element, arg)
-  }, { selector, index, source: fn.toString(), arg })
+  }, { selector, index, source: fn.toString(), arg }))
 }
 
 async function waitForIndexed(page, selector, index, options = {}) {
@@ -170,17 +197,21 @@ async function waitForIndexed(page, selector, index, options = {}) {
   const state = options.state || 'attached'
   const deadline = Date.now() + timeout
   while (true) {
-    const matched = await page.evaluate(({ selector, index, state }) => {
-      const nodes = Array.from(document.querySelectorAll(selector))
-      const resolved = index < 0 ? nodes.length + index : index
-      const element = nodes[resolved]
-      const visible = Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden')
-      if (state === 'detached') return !element
-      if (state === 'hidden') return !element || !visible
-      if (state === 'visible') return visible
-      return Boolean(element)
-    }, { selector, index, state })
-    if (matched) return true
+    try {
+      const matched = await page.evaluate(evaluateWithDeepQuery(({ selector, index, state }) => {
+        const nodes = deepQueryAll(selector)
+        const resolved = index < 0 ? nodes.length + index : index
+        const element = nodes[resolved]
+        const visible = Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden')
+        if (state === 'detached') return !element
+        if (state === 'hidden') return !element || !visible
+        if (state === 'visible') return visible
+        return Boolean(element)
+      }, { selector, index, state }))
+      if (matched) return true
+    } catch (error) {
+      if (!isTransientNavigationError(error)) throw error
+    }
     if (Date.now() >= deadline) return false
     await page.waitForTimeout(100)
   }

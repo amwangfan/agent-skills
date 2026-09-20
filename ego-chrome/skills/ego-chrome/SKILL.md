@@ -3,7 +3,7 @@ name: ego-chrome
 description: >-
   Control the user's current Chrome profile through the local ego-chrome extension and CLI. Use for navigation, forms, dynamic interfaces, extraction, and browser testing that benefit from existing login state. Minimize execution rounds and model input: keep predictable work in one invocation, prefer semantic locators and bounded DOM reads, and use compact snapshots only when the state is genuinely unknown.
 metadata:
-  version: "0.2.2"
+  version: "0.3.0"
 ---
 
 # ego-chrome
@@ -140,6 +140,10 @@ Do not stop merely because an ordinary menu, chooser, popup, or dialog opened. C
 - Let a successful action carry the script forward. Read state when it determines a branch and once for the required final postconditions, not after every action.
 - On failure, use one targeted observation to change strategy materially. Do not repeat near-identical locators, commands, or snapshots.
 - When a required click may navigate the current tab or open another one, click once and resolve the result from the URL plus a refreshed `browser.listTabs()` inside the same script. Do not silently replace a user-requested interaction with direct navigation.
+- Prefer idempotent `check()`, `uncheck()`, and `selectOption()` over generic clicks for form controls. Radio buttons cannot be unchecked.
+- Use `hover()` only when hovering is strictly required to reveal dynamic interface elements.
+- `setInputFiles()` must only use local paths explicitly specified by the user; never explore or probe the filesystem to discover files. The bridge resolves local paths via CDP without reading file contents, but Chrome and the target website will read and upload files upon form submission.
+- Open Shadow DOM is handled automatically by locators within each root scope; compound CSS selectors crossing host boundaries are not supported. Closed Shadow DOM cannot be accessed and marks a capability boundary.
 
 ## Interaction paths
 
@@ -163,6 +167,16 @@ await rows.allInnerTexts()
 await rows.evaluateAll((nodes) => nodes.slice(0, 50).map((node) => node.innerText))
 await rows.first().innerText()
 await rows.nth(1).click()
+
+await page.locator('input#agree').check()
+await page.locator('input#agree').uncheck()
+await page.locator('input#agree').isChecked()
+await page.locator('select#country').selectOption('US')
+await page.selectOption('select#country', { label: 'United States' })
+await page.selectOption('select#country', { index: 1 })
+await page.locator('.menu-trigger').hover()
+await page.locator('input[type=file]').setInputFiles('C:\\path\\file.pdf')
+await page.locator('input[type=file]').setInputFiles([])
 
 await page.findText('Continue', { maxResults: 10 })
 await page.clickText('Continue', { exact: true })

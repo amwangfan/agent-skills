@@ -1,6 +1,6 @@
 {
   "name": "ego-chrome-extension",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Local-first Chrome automation bridge and Agent skill with semantic snapshots.",
   "type": "module",
   "bin": {

@@ -14,12 +14,43 @@ export function createSemanticLocator(page, query, index = null) {
     fill: (value, options) => withSemanticTarget(page, query, selectedIndex, (target) => page.fill(target, value, options)),
     press: (key, options) => withSemanticTarget(page, query, selectedIndex, async (target) => {
       await page.evaluate((value) => {
-        const element = document.querySelector(value)
+        const findElement = (root) => {
+          if (!root) return null
+          if (typeof root.querySelector === 'function') {
+            try {
+              const el = root.querySelector(value)
+              if (el) return el
+            } catch {}
+          }
+          const walker = (node) => {
+            if (!node) return null
+            if (node.shadowRoot) {
+              const found = findElement(node.shadowRoot)
+              if (found) return found
+            }
+            const children = node.children || []
+            for (let i = 0; i < children.length; i++) {
+              const found = walker(children[i])
+              if (found) return found
+            }
+            return null
+          }
+          return walker(root)
+        }
+        const start = document.body || document.documentElement || document
+        const element = findElement(start)
         if (!element) throw new Error(`Element not found: ${value}`)
-        element.focus()
+        if (typeof element.focus === 'function') element.focus()
       }, target)
       return page.press(key, options)
     }),
+    hover: (options) => withSemanticTarget(page, query, selectedIndex, (target) => page.hover(target, options)),
+    check: (options) => withSemanticTarget(page, query, selectedIndex, (target) => page.check(target, options)),
+    uncheck: (options) => withSemanticTarget(page, query, selectedIndex, (target) => page.uncheck(target, options)),
+    setChecked: (checked, options) => withSemanticTarget(page, query, selectedIndex, (target) => page.setChecked(target, checked, options)),
+    isChecked: () => withSemanticTarget(page, query, selectedIndex, (target) => page.isChecked(target)),
+    selectOption: (values) => withSemanticTarget(page, query, selectedIndex, (target) => page.selectOption(target, values)),
+    setInputFiles: (files) => withSemanticTarget(page, query, selectedIndex, (target) => page.setInputFiles(target, files)),
     innerText: () => evaluateSemantic(page, query, selectedIndex, (element) => element.innerText),
     textContent: () => evaluateSemantic(page, query, selectedIndex, (element) => element.textContent),
     inputValue: () => evaluateSemantic(page, query, selectedIndex, (element) => element.value ?? null),
@@ -60,9 +91,7 @@ async function withSemanticTarget(page, query, index, action) {
   try {
     return await action(`[data-ego-chrome-semantic-target="${marker}"]`)
   } finally {
-    await page.evaluate((value) => {
-      document.querySelector(`[data-ego-chrome-semantic-target="${value}"]`)?.removeAttribute('data-ego-chrome-semantic-target')
-    }, marker).catch(() => {})
+    await page.evaluate(semanticQueryOperation, { operation: 'unmark', marker }).catch(() => {})
   }
 }
 
@@ -101,6 +130,36 @@ export function isTransientNavigationError(error) {
 
 export function semanticQueryOperation(payload) {
   const { operation, query, index = 0, marker, source, arg, state } = payload
+
+  if (operation === 'unmark') {
+    const attr = 'data-ego-chrome-semantic-target'
+    const sel = `[${attr}="${marker}"]`
+    if (typeof document !== 'undefined' && document.querySelector) {
+      const el = document.querySelector(sel)
+      if (el) {
+        el.removeAttribute(attr)
+        return true
+      }
+    }
+    const remove = (node) => {
+      if (!node) return false
+      if (typeof node.removeAttribute === 'function' && node.getAttribute?.(attr) === marker) {
+        node.removeAttribute(attr)
+        return true
+      }
+      if (node.shadowRoot && remove(node.shadowRoot)) {
+        return true
+      }
+      const children = node.children ? Array.from(node.children) : []
+      for (const child of children) {
+        if (remove(child)) return true
+      }
+      return false
+    }
+    const root = document.body || document.documentElement || document
+    remove(root)
+    return true
+  }
 
   const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim()
   const visible = (element) => {
@@ -149,38 +208,71 @@ export function semanticQueryOperation(payload) {
     if (tag === 'progress') return 'progressbar'
     return ''
   }
+
+  const findElementById = (element, id) => {
+    if (!id) return null
+    const rootNode = typeof element.getRootNode === 'function' ? element.getRootNode() : null
+    if (rootNode && rootNode !== document) {
+      if (typeof rootNode.getElementById === 'function') {
+        const target = rootNode.getElementById(id)
+        if (target) return target
+      }
+      if (typeof rootNode.querySelector === 'function') {
+        try {
+          const idSelector = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&')
+          const target = rootNode.querySelector(`#${idSelector}`)
+          if (target) return target
+        } catch {}
+      }
+    }
+    if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
+      const docTarget = document.getElementById(id)
+      if (docTarget) return docTarget
+    }
+    return null
+  }
+
   const labelledBy = (element) => String(element.getAttribute('aria-labelledby') || '')
     .split(/\s+/)
     .filter(Boolean)
     .map((id) => {
-      const target = document.getElementById(id)
+      const target = findElementById(element, id)
       return target ? (target.innerText || target.textContent || '') : ''
     })
     .filter(Boolean)
     .join(' ')
+
+  const resolveLabels = (scope, id) => {
+    if (!scope || typeof scope.querySelectorAll !== 'function') return []
+    try {
+      const idSelector = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&')
+      return Array.from(scope.querySelectorAll(`label[for="${idSelector}"]`))
+    } catch {
+      const explicitLabels = scope.querySelectorAll('label[for]')
+      return Array.from(explicitLabels).filter((label) => label.getAttribute('for') === id)
+    }
+  }
+
   const labelsFor = (element) => {
     const labels = element.labels ? Array.from(element.labels) : []
     if (element.id) {
-      try {
-        const idSelector = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(element.id) : element.id.replace(/["\\]/g, '\\$&')
-        const explicitLabels = document.querySelectorAll(`label[for="${idSelector}"]`)
-        for (const label of explicitLabels) {
-          if (!labels.includes(label)) labels.push(label)
-        }
-      } catch {
-        const id = element.id
-        const explicitLabels = document.querySelectorAll('label[for]')
-        for (const label of explicitLabels) {
-          if (label.getAttribute('for') === id && !labels.includes(label)) {
-            labels.push(label)
-          }
-        }
+      const rootNode = typeof element.getRootNode === 'function' ? element.getRootNode() : null
+      let explicitLabels = []
+      if (rootNode && rootNode !== document) {
+        explicitLabels = resolveLabels(rootNode, element.id)
+      }
+      if (explicitLabels.length === 0 && typeof document !== 'undefined') {
+        explicitLabels = resolveLabels(document, element.id)
+      }
+      for (const label of explicitLabels) {
+        if (!labels.includes(label)) labels.push(label)
       }
     }
     const wrapped = element.closest?.('label')
     if (wrapped && !labels.includes(wrapped)) labels.push(wrapped)
     return labels.map((label) => label.innerText || label.textContent || '').join(' ')
   }
+
   const tableCaption = (element) => {
     if (element.tagName.toLowerCase() === 'table') {
       const caption = element.querySelector?.('caption')
@@ -227,40 +319,15 @@ export function semanticQueryOperation(payload) {
     const expected = matcher.caseSensitive ? matcher.value : matcher.value.toLowerCase()
     return matcher.exact ? actual === expected : actual.includes(expected)
   }
+
   const collect = () => {
-    const root = document.body || document.documentElement
-    const selector = [
-      'button',
-      'a[href]',
-      'input',
-      'textarea',
-      'select',
-      'option',
-      'summary',
-      '[role]',
-      '[contenteditable]:not([contenteditable="false"])',
-      'h1, h2, h3, h4, h5, h6',
-      'dialog',
-      'table',
-      'tr',
-      'td',
-      'th',
-      'ul',
-      'ol',
-      'menu',
-      'li',
-      'nav',
-      'main',
-      'header',
-      'footer',
-      'aside',
-      'article',
-      'img',
-      'progress',
-      '[id]',
-    ].join(', ')
+    const root = document.body || document.documentElement || document
     const allowHidden = query.includeHidden || (operation === 'state' && (state === 'attached' || state === 'detached'))
-    return Array.from(root.querySelectorAll(selector)).filter((element) => {
+
+    const candidates = []
+    const seen = new Set()
+
+    const matchesCandidate = (element) => {
       if (!allowHidden && !visible(element)) return false
       if (query.kind === 'role') {
         if (roleOf(element) !== query.role) return false
@@ -268,7 +335,30 @@ export function semanticQueryOperation(payload) {
       }
       if (!isLabelable(element)) return false
       return matches(labelName(element), query.matcher)
-    })
+    }
+
+    const walk = (node) => {
+      if (!node) return
+      const children = node.children ? Array.from(node.children) : []
+      for (const child of children) {
+        if (!seen.has(child)) {
+          seen.add(child)
+          if (matchesCandidate(child)) {
+            candidates.push(child)
+          }
+        }
+        if (child.shadowRoot) {
+          walk(child.shadowRoot)
+        }
+        walk(child)
+      }
+    }
+
+    if (root && root.shadowRoot) {
+      walk(root.shadowRoot)
+    }
+    walk(root)
+    return candidates
   }
 
   const nodes = collect()

@@ -26,7 +26,9 @@ The project is adapted and redesigned from CitroLabs ego-lite's interaction mode
 - Provides atomic navigation waiting in `page.goto()` and `browser.openTab()`.
 - Safely auto-dismisses native JavaScript dialogs (`alert`, `confirm`, `prompt`) by default, with opt-in acceptance via `page.setNextDialogAction('accept')` and evidence inspection via `page.lastDialog()`.
 - Produces compact semantic snapshots with temporary `@N` references.
-- Clicks and fills elements by snapshot ref or CSS selector.
+- Clicks, fills, hovers, checks, unchecks, and selects form elements by snapshot ref or locator.
+- Supports recursive element resolution inside open Shadow DOM roots for semantic locators and selectors (scoped within each open root; compound selectors crossing host boundaries are not supported).
+- Supports local file uploads via `setInputFiles()`.
 - Finds and clicks visible text in dynamic menus and custom elements with a real CDP mouse event.
 - Supports trusted key presses, URL waits, page evaluation, targeted text extraction, selectors, and waits.
 - Requires explicit tab selection before any page operation, preventing accidental takeover of an unrelated tab.
@@ -307,6 +309,83 @@ const dialog = await page.lastDialog()
 console.log(dialog) // { type: 'confirm', message: 'Delete this item?', action: 'accept', ... }
 ```
 
+## Form controls and hover
+
+The runtime provides dedicated methods for form controls and mouse hovering:
+
+### Checkbox and radio (`check`, `uncheck`, `isChecked`)
+
+- `check()` and `uncheck()` are **idempotent**: calling `check()` on an already-checked element or `uncheck()` on an already-unchecked element does not toggle it again and is safely repeatable.
+- Radio buttons (`input[type="radio"]`) can be checked with `check()`, but **cannot be unchecked** with `uncheck()` (reflecting standard HTML semantics where radio selections cannot be cleared by unchecking).
+- `isChecked()` returns whether the checkbox or radio input is currently checked.
+
+```javascript
+// Idempotent checkbox interactions
+const agree = page.locator('input#agree')
+await agree.check()
+await agree.uncheck()
+const checked = await agree.isChecked()
+
+// Radio buttons can be checked, but cannot be unchecked
+await page.locator('input[type=radio]#option-a').check()
+```
+
+### Dropdown selection (`selectOption`)
+
+`selectOption` selects `<option>` elements within a `<select>` dropdown. In alignment with Playwright conventions, a plain string matches the option's `value` attribute, while matching by visible text requires `{ label: ... }`:
+
+```javascript
+// By string (matches option value attribute; use { label: '...' } for visible text)
+await page.selectOption('select#country', 'US')
+
+// By explicit value attribute
+await page.locator('select#country').selectOption({ value: 'US' })
+
+// By visible label text (label must use an object descriptor)
+await page.locator('select#country').selectOption({ label: 'United States' })
+
+// By 0-based index
+await page.locator('select#country').selectOption({ index: 2 })
+
+// Multi-select with an array of values
+await page.locator('select#skills').selectOption(['javascript', 'python'])
+```
+
+### Hover (`hover`)
+
+`page.hover(selector)` and `locator.hover()` dispatch a CDP mouse move over the element. Use hover only when hovering is strictly required to reveal dynamic menus, dropdown triggers, or tooltips:
+
+```javascript
+await page.locator('.dropdown-trigger').hover()
+await page.hover('button.menu-button')
+```
+
+## File uploads (`setInputFiles`)
+
+`page.setInputFiles(selector, files)` and `locator.setInputFiles(files)` set files on `<input type="file">` elements using Chrome DevTools Protocol (`DOM.setFileInputFiles`):
+
+```javascript
+// Single file upload with an absolute local path
+await page.setInputFiles('input[type=file]', 'C:\\path\\to\\document.pdf')
+
+// Multiple file upload
+await page.locator('input[type=file][multiple]').setInputFiles([
+  'C:\\path\\to\\file1.png',
+  'C:\\path\\to\\file2.png',
+])
+
+// Clear selected files
+await page.locator('input[type=file]').setInputFiles([])
+```
+
+> **⚠️ File Upload Security & Scope:**
+> `setInputFiles` only validates and resolves the local filesystem path(s) and sends them to Chrome via CDP (`DOM.setFileInputFiles`); the ego-chrome bridge itself does **not** read or transport file contents. However, when the form is submitted or processed by the page, Google Chrome and the target website will naturally read and upload the actual file content. The paths must be local absolute paths that the running Chrome process has direct permissions to access.
+
+## Shadow DOM traversal
+
+- **Open Shadow DOM**: The locator engine recursively traverses open shadow roots (`Element.shadowRoot`). Selectors and semantic matchers evaluate within each open root scope to locate elements residing inside open shadow roots. Note that selectors are evaluated within individual root boundaries; complex compound selectors that attempt to cross host boundaries in a single selector expression (e.g. `host > shadow-child`) are not supported.
+- **Closed Shadow DOM**: Closed shadow roots (`mode: "closed"`) cannot be accessed via standard DOM APIs and are **not supported**. Closed shadow DOM boundaries represent an explicit capability limit.
+
 ## API
 
 ### `browser`
@@ -331,7 +410,18 @@ Matching modes are `exact`, `origin`, `origin+path`, and `includes`.
 await page.snapshot({ maxChars: 12000, includeText: true })
 await page.click('@1')
 await page.click('button[type=submit]')
+await page.hover('button.menu-trigger')
 await page.fill('@2', 'value')
+await page.check('input#agree')
+await page.uncheck('input#agree')
+await page.isChecked('input#agree')
+await page.selectOption('select#country', 'US')
+await page.selectOption('select#country', { value: 'US' })
+await page.selectOption('select#country', { label: 'United States' })
+await page.selectOption('select#country', { index: 2 })
+await page.setInputFiles('input[type=file]', 'C:\\path\\to\\file.pdf')
+await page.setInputFiles('input[type=file]', ['C:\\path\\to\\file1.png', 'C:\\path\\to\\file2.png'])
+await page.setInputFiles('input[type=file]', [])
 await page.findText('Menu item', { exact: false })
 await page.clickText('Menu item', { exact: true, nth: 0 })
 await page.getByText('Continue', { exact: true }).click()
@@ -360,6 +450,16 @@ const email = page.locator('input[name=email]')
 await email.fill('me@example.com')
 await email.press('Enter')
 await page.locator('button[type=submit]').click()
+await page.locator('button.menu-trigger').hover()
+await page.locator('input#agree').check()
+await page.locator('input#agree').uncheck()
+const isChecked = await page.locator('input#agree').isChecked()
+await page.locator('select#country').selectOption('US')
+await page.locator('select#country').selectOption({ label: 'United States' })
+await page.locator('select#country').selectOption({ index: 2 })
+await page.locator('input[type=file]').setInputFiles('C:\\path\\to\\file.pdf')
+await page.locator('input[type=file]').setInputFiles(['C:\\path\\to\\file1.png', 'C:\\path\\to\\file2.png'])
+await page.locator('input[type=file]').setInputFiles([])
 const status = await page.locator('.status').textContent()
 ```
 
@@ -422,6 +522,9 @@ Change `port` in `%LOCALAPPDATA%\ego-chrome\config.json`, then enter the same po
 
 - Opening DevTools or attaching another debugger to the same tab can disconnect automation.
 - Deep cross-origin iframe snapshot merging is not implemented yet.
+- Closed Shadow DOM trees cannot be traversed or inspected (open Shadow DOM is recursively supported within each root scope).
+- Downloads and network idle/activity waits are not yet implemented.
+- File uploads (`setInputFiles`) require Chrome to have direct filesystem access to local absolute paths; the ego-chrome bridge itself does not read file bytes, but Chrome and the target website will read and upload the file when the form is submitted.
 - Canvas, WebGL, maps, remote desktops, and visual-only surfaces are not semantically observable.
 - Browser-internal pages such as `chrome://settings` cannot be controlled.
 - Background tabs share the same cookie and storage state. This is intentional for login reuse, not security isolation.
@@ -443,9 +546,8 @@ After changing extension files, reload the unpacked extension. After changing th
 1. Recursive cross-origin iframe attachment and snapshot merging.
 2. Incremental snapshot diffs.
 3. Tab-group-backed task spaces.
-4. Semantic role and label locators.
-5. Downloads, uploads, and network waits.
-6. Explicit visual fallback for exceptional pages, disabled by default.
+4. Downloads and network idle/activity waits.
+5. Explicit visual fallback for exceptional pages, disabled by default.
 
 ## License
 

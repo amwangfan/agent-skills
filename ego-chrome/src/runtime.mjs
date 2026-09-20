@@ -1,3 +1,6 @@
+import path from 'node:path'
+import { access } from 'node:fs/promises'
+
 const DEFAULT_TIMEOUT = 10_000
 
 export function createRuntime(rpc, options = {}) {
@@ -159,6 +162,56 @@ export function createRuntime(rpc, options = {}) {
       })
     },
 
+    async hover(target, options = {}) {
+      return call('page.hover', {
+        tabId: requireSelectedTabId(),
+        target,
+        options,
+      })
+    },
+
+    async isChecked(target) {
+      return call('page.isChecked', {
+        tabId: requireSelectedTabId(),
+        target,
+      })
+    },
+
+    async setChecked(target, checked = true, options = {}) {
+      return call('page.setChecked', {
+        tabId: requireSelectedTabId(),
+        target,
+        checked: Boolean(checked),
+        options,
+      })
+    },
+
+    async check(target, options = {}) {
+      return page.setChecked(target, true, options)
+    },
+
+    async uncheck(target, options = {}) {
+      return page.setChecked(target, false, options)
+    },
+
+    async selectOption(target, values) {
+      const normalizedValues = normalizeSelectOptions(values)
+      return call('page.selectOption', {
+        tabId: requireSelectedTabId(),
+        target,
+        values: normalizedValues,
+      })
+    },
+
+    async setInputFiles(target, files) {
+      const resolvedFiles = await normalizeInputFiles(files)
+      return call('page.setInputFiles', {
+        tabId: requireSelectedTabId(),
+        target,
+        files: resolvedFiles,
+      })
+    },
+
     async press(key, options = {}) {
       return call('page.press', {
         tabId: requireSelectedTabId(),
@@ -223,11 +276,16 @@ export function createRuntime(rpc, options = {}) {
     },
 
     async textContent(selector) {
-      return page.evaluate((value) => document.querySelector(value)?.textContent ?? null, selector)
+      return page.evaluate(evaluateWithDeepQuery(({ selector }) => {
+        const element = deepQueryOne(selector)
+        return element?.textContent ?? null
+      }, { selector }))
     },
 
     async count(selector) {
-      return page.evaluate((value) => document.querySelectorAll(value).length, selector)
+      return page.evaluate(evaluateWithDeepQuery(({ selector }) => {
+        return deepQueryAll(selector).length
+      }, { selector }))
     },
 
     async findText(text, options = {}) {
@@ -250,11 +308,10 @@ export function createRuntime(rpc, options = {}) {
         return selected.selected
       } finally {
         await page
-          .evaluate((value) => {
-            document
-              .querySelector(`[data-ego-chrome-text-target="${value}"]`)
+          .evaluate(evaluateWithDeepQuery(({ marker }) => {
+            deepQueryOne(`[data-ego-chrome-text-target="${marker}"]`)
               ?.removeAttribute('data-ego-chrome-text-target')
-          }, marker)
+          }, { marker }))
           .catch(() => {})
       }
     },
@@ -274,9 +331,9 @@ export function createRuntime(rpc, options = {}) {
       const deadline = Date.now() + timeout
       while (true) {
         try {
-          const result = await page.evaluate(
+          const result = await page.evaluate(evaluateWithDeepQuery(
             ({ selector, state }) => {
-              const element = document.querySelector(selector)
+              const element = deepQueryOne(selector)
               const visible = Boolean(
                 element &&
                   element.getClientRects().length &&
@@ -288,7 +345,7 @@ export function createRuntime(rpc, options = {}) {
               return Boolean(element)
             },
             { selector, state },
-          )
+          ))
           if (result) return true
         } catch (error) {
           if (!isTransientNavigationError(error)) throw error
@@ -367,13 +424,20 @@ function createLocator(page, selector) {
   return {
     click: (options) => page.click(selector, options),
     fill: (value, options) => page.fill(selector, value, options),
+    hover: (options) => page.hover(selector, options),
+    check: (options) => page.check(selector, options),
+    uncheck: (options) => page.uncheck(selector, options),
+    setChecked: (checked, options) => page.setChecked(selector, checked, options),
+    isChecked: () => page.isChecked(selector),
+    selectOption: (values) => page.selectOption(selector, values),
+    setInputFiles: (files) => page.setInputFiles(selector, files),
     press: async (key, options) => {
-      await page.evaluate((value) => {
-        const element = document.querySelector(value)
-        if (!element) throw new Error(`Element not found: ${value}`)
+      await page.evaluate(evaluateWithDeepQuery(({ selector }) => {
+        const element = deepQueryOne(selector)
+        if (!element) throw new Error(`Element not found: ${selector}`)
         element.focus()
         return true
-      }, selector)
+      }, { selector }))
       return page.press(key, options)
     },
     textContent: () => page.textContent(selector),
@@ -381,12 +445,14 @@ function createLocator(page, selector) {
     waitFor: (options) => page.waitForSelector(selector, options),
     evaluate: (fn, arg) =>
       page.evaluate(
-        ({ selector, source, arg }) => {
-          const element = document.querySelector(selector)
-          if (!element) throw new Error(`Element not found: ${selector}`)
-          return (0, eval)(`(${source})`)(element, arg)
-        },
-        { selector, source: fn.toString(), arg },
+        evaluateWithDeepQuery(
+          ({ selector, source, arg }) => {
+            const element = deepQueryOne(selector)
+            if (!element) throw new Error(`Element not found: ${selector}`)
+            return (0, eval)(`(${source})`)(element, arg)
+          },
+          { selector, source: fn.toString(), arg },
+        ),
       ),
   }
 }
@@ -460,27 +526,84 @@ function collectVisibleTextMatches({ text, exact, caseSensitive, nth, selector, 
     'label',
   ].join(',')
 
-  for (const element of root.querySelectorAll(attributeSelector)) {
-    const values = [
-      element.getAttribute('aria-label'),
-      element.getAttribute('title'),
-      element.getAttribute('alt'),
-      element.getAttribute('value'),
-      element.innerText,
-    ]
-    if (values.some(textMatches)) addCandidate(element)
+  const scanScope = (scope) => {
+    if (!scope) return
+    if (scope.querySelectorAll) {
+      for (const element of scope.querySelectorAll(attributeSelector)) {
+        const values = [
+          element.getAttribute('aria-label'),
+          element.getAttribute('title'),
+          element.getAttribute('alt'),
+          element.getAttribute('value'),
+          element.innerText,
+        ]
+        if (values.some(textMatches)) addCandidate(element)
+      }
+    }
+    const doc = scope.ownerDocument || (scope.nodeType === 9 ? scope : document)
+    const showText = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_TEXT : 4
+    if (doc && doc.createTreeWalker) {
+      const textWalker = doc.createTreeWalker(scope, showText)
+      let textNode
+      while ((textNode = textWalker.nextNode())) {
+        if (!textMatches(textNode.nodeValue)) continue
+        addCandidate(textNode.parentElement)
+      }
+
+      const showElement = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_ELEMENT : 1
+      const elemWalker = doc.createTreeWalker(scope, showElement)
+      let el = elemWalker.nextNode()
+      while (el) {
+        if (el.shadowRoot) {
+          scanScope(el.shadowRoot)
+        }
+        el = elemWalker.nextNode()
+      }
+    } else if (scope.children) {
+      for (let i = 0; i < scope.children.length; i++) {
+        const child = scope.children[i]
+        if (child.shadowRoot) {
+          scanScope(child.shadowRoot)
+        }
+      }
+    }
   }
 
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  let node
-  while ((node = walker.nextNode())) {
-    if (!textMatches(node.nodeValue)) continue
-    addCandidate(node.parentElement)
-  }
+  scanScope(root)
 
   candidates.sort((left, right) => {
     if (left === right) return 0
-    return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+    const getPath = (node) => {
+      const path = []
+      let cur = node
+      while (cur) {
+        path.push(cur)
+        const r = cur.getRootNode ? cur.getRootNode() : null
+        cur = r && r !== cur && r.host ? r.host : null
+      }
+      return path
+    }
+    const pathL = getPath(left)
+    const pathR = getPath(right)
+    let commonL = null
+    let commonR = null
+    while (pathL.length > 0 && pathR.length > 0) {
+      const l = pathL.pop()
+      const r = pathR.pop()
+      if (l !== r) {
+        commonL = l
+        commonR = r
+        break
+      }
+    }
+    if (commonL && commonR) {
+      if (commonL.compareDocumentPosition) {
+        const FOLLOWING = (typeof Node !== 'undefined' && Node.DOCUMENT_POSITION_FOLLOWING) || 4
+        return (commonL.compareDocumentPosition(commonR) & FOLLOWING) ? -1 : 1
+      }
+      return 0
+    }
+    return pathL.length > 0 ? 1 : -1
   })
 
   const summaries = candidates.slice(0, maxResults).map((element, index) => ({
@@ -570,7 +693,7 @@ function urlExpectationMatches(href, expected) {
   throw new TypeError('page.waitForURL expects a string, RegExp, or predicate function')
 }
 
-function isTransientNavigationError(error) {
+export function isTransientNavigationError(error) {
   return /Cannot access|No tab|closed|navigation|context|Execution context was destroyed|Inspected target navigated/i.test(
     error?.message || '',
   )
@@ -587,4 +710,168 @@ function isWebUrl(url) {
 function findTask(taskMap, nameOrId) {
   if (typeof nameOrId === 'string') return taskMap.get(nameOrId)
   return [...taskMap.values()].find((task) => task.id === nameOrId)
+}
+
+export function normalizeSelectOptions(values) {
+  if (values === undefined || values === null) {
+    throw new TypeError('page.selectOption requires values (string, array, or descriptor)')
+  }
+  const rawList = Array.isArray(values) ? values : [values]
+  const allowedKeys = ['value', 'label', 'index']
+  const result = []
+
+  for (const item of rawList) {
+    if (typeof item === 'string') {
+      result.push({ value: item })
+    } else if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+      const keys = Object.keys(item)
+      for (const key of keys) {
+        if (!allowedKeys.includes(key)) {
+          throw new TypeError(`Invalid selectOption descriptor key: ${key}`)
+        }
+      }
+      const desc = {}
+      let hasValidField = false
+      if (item.value !== undefined) {
+        desc.value = String(item.value)
+        hasValidField = true
+      }
+      if (item.label !== undefined) {
+        desc.label = String(item.label)
+        hasValidField = true
+      }
+      if (item.index !== undefined) {
+        if (!Number.isInteger(item.index) || item.index < 0) {
+          throw new TypeError(`selectOption index must be a non-negative integer, got: ${item.index}`)
+        }
+        desc.index = item.index
+        hasValidField = true
+      }
+      if (!hasValidField) {
+        throw new TypeError('selectOption descriptor must specify at least one of value, label, or index')
+      }
+      result.push(desc)
+    } else {
+      throw new TypeError(`Invalid selectOption value item: ${String(item)}`)
+    }
+  }
+
+  return result
+}
+
+export async function normalizeInputFiles(files) {
+  if (typeof files === 'string') {
+    files = [files]
+  } else if (!Array.isArray(files)) {
+    throw new TypeError('page.setInputFiles requires a file path string or array of paths')
+  }
+  const resolvedFiles = []
+  for (const file of files) {
+    if (typeof file !== 'string' || !file.trim()) {
+      throw new TypeError('File path must be a non-empty string')
+    }
+    const resolved = path.resolve(file)
+    try {
+      await access(resolved)
+    } catch {
+      throw new Error(`File not found: ${resolved}`)
+    }
+    resolvedFiles.push(resolved)
+  }
+  return resolvedFiles
+}
+
+export function deepQueryAll(selector, root = (typeof document !== 'undefined' ? document : null)) {
+  if (!root) return []
+  const results = []
+  const seen = new Set()
+  const start = root.documentElement || root
+  function add(el) {
+    if (el && !seen.has(el)) {
+      seen.add(el)
+      results.push(el)
+    }
+  }
+  function walk(container) {
+    if (!container) return
+    if (container !== root && container.matches && container.matches(selector)) {
+      add(container)
+    }
+    if (container.shadowRoot) {
+      walk(container.shadowRoot)
+    }
+    const doc = container.ownerDocument || (container.nodeType === 9 ? container : (typeof document !== 'undefined' ? document : null))
+    if (doc && doc.createTreeWalker) {
+      const showElement = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_ELEMENT : 1
+      const walker = doc.createTreeWalker(container, showElement)
+      let node = walker.nextNode()
+      while (node) {
+        if (node.matches && node.matches(selector)) {
+          add(node)
+        }
+        if (node.shadowRoot) {
+          walk(node.shadowRoot)
+        }
+        node = walker.nextNode()
+      }
+    } else if (container.children) {
+      for (let i = 0; i < container.children.length; i++) {
+        walk(container.children[i])
+      }
+    } else if (container.querySelectorAll) {
+      for (const el of container.querySelectorAll(selector)) {
+        add(el)
+      }
+    }
+  }
+  walk(start)
+  return results
+}
+
+export function deepQueryOne(selector, root = (typeof document !== 'undefined' ? document : null)) {
+  if (!root) return null
+  const start = root.documentElement || root
+  function walk(container) {
+    if (!container) return null
+    if (container !== root && container.matches && container.matches(selector)) {
+      return container
+    }
+    if (container.shadowRoot) {
+      const found = walk(container.shadowRoot)
+      if (found) return found
+    }
+    const doc = container.ownerDocument || (container.nodeType === 9 ? container : (typeof document !== 'undefined' ? document : null))
+    if (doc && doc.createTreeWalker) {
+      const showElement = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_ELEMENT : 1
+      const walker = doc.createTreeWalker(container, showElement)
+      let node = walker.nextNode()
+      while (node) {
+        if (node.matches && node.matches(selector)) {
+          return node
+        }
+        if (node.shadowRoot) {
+          const found = walk(node.shadowRoot)
+          if (found) return found
+        }
+        node = walker.nextNode()
+      }
+    } else if (container.children) {
+      for (let i = 0; i < container.children.length; i++) {
+        const found = walk(container.children[i])
+        if (found) return found
+      }
+    } else if (container.querySelector) {
+      return container.querySelector(selector)
+    }
+    return null
+  }
+  return walk(start)
+}
+
+export function evaluateWithDeepQuery(pageFunction, arg) {
+  return `(() => {
+  ${deepQueryAll.toString()}
+  ${deepQueryOne.toString()}
+  return (${pageFunction.toString()})(${serializeArg(arg)});
+})()`
 }
