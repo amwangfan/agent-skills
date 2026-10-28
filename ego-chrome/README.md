@@ -1,69 +1,51 @@
 # ego-chrome
 
-> **📌 二次开发与致谢声明 (Attribution & Fork Notes)**  
-> 本项目是基于 [CitroLabs ego-lite / ego-browser](https://github.com/citrolabs/ego-lite) 进行的**二次开发 (Second Development / Derivative Work)**。  
-> 
-> **与原版的主要差异与二开特性：**
-> 1. **无需定制/重编译 Chromium**：原版 ego 依赖定制化浏览器环境；本项目重构为轻量级 **Chrome MV3 扩展 (Manifest V3 Extension) + 本地 Node.js CLI 桥接**，直接附加至用户正在运行的普通 Google Chrome，零侵入性。
-> 2. **直接复用当前 Chrome 个人 Profile**：完美继承当前浏览器的所有登录态、Cookies、密码、已安装插件以及本地存储，无需反复处理登录验证码。
-> 3. **极低 Token 消耗的语义快照**：采用 Accessibility Tree（无障碍树）与紧凑 DOM 回退生成语义文本快照，避免截图输入对大模型带来海量上下文/Token 开销。
-> 4. **内置 Chrome 插件本体**：本项目仓库内置了完整的 Chrome 插件本体源码（位于 `extension/` 目录），可在 Chrome 中直接开启“开发者模式”并“加载已解压的扩展程序”即可使用。
-> 5. **Agent Skill 开箱即用**：项目根目录提供 `SKILL.md`，可作为标准 Agent Skill 被 DeepSeek Harness、Claude Code、Codex 等各大 AI Agent 直接载入。
+> **二次开发与致谢声明**  
+> 本项目基于 [CitroLabs ego-lite / ego-browser](https://github.com/citrolabs/ego-lite) 的交互模型进行二次开发。核心执行准则改编自 ego-browser 1.2.6，采用 MIT License。详见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
 
----
+ego-chrome 是一套本地优先的 Chrome 扩展与 Agent Skill，主要目标是：复用用户当前 Chrome Profile 的登录态，并通过语义快照减少模型输入和 Token 消耗。
 
-A personal, local-first Chrome extension and Agent skill for browser automation with two priorities:
+项目使用 Manifest V3 扩展连接本地 Node.js CLI 桥接服务，通过 Chrome DevTools Protocol（CDP）控制选定标签页，提供一组 Playwright 风格的 JavaScript API。
 
-1. reuse the login state in your current Chrome profile;
-2. keep model input small with semantic text snapshots instead of screenshots.
+## 主要能力
 
-The project is adapted and redesigned from CitroLabs ego-lite's interaction model. A Manifest V3 extension attaches to selected tabs through `chrome.debugger`, reads the accessibility tree plus a compact DOM fallback, and exposes a small Playwright-like JavaScript API through the `ego-chrome` CLI.
+- **复用现有登录态**：直接使用当前 Chrome Profile 的 Cookies、站点存储和登录会话。
+- **低 Token 交互**：基于无障碍树和精简 DOM 回退生成语义快照，不需要把截图发送给模型。
+- **后台打开标签页**：自动化任务默认在后台标签页运行。
+- **语义定位器与 DOM 操作**：支持点击、填写、悬停、复选框、下拉选择、文本查找和结构化提取。
+- **动态界面支持**：可处理常见菜单、弹层和自定义元素；支持开放的 Shadow DOM。
+- **显式标签页选择**：每次调用必须明确选择标签页，避免误操作用户正在查看的标签页。
+- **原生对话框处理**：默认安全关闭 JavaScript 对话框；需要时可显式接受并检查结果。
+- **文件上传**：支持通过 CDP 设置本地文件输入框。
+- **Agent Skill**：仓库内提供 `SKILL.md`，可供支持 Agent Skills 的智能体加载。
 
-## Current capabilities
-
-- Reuses current Chrome cookies, site storage, extensions, and logged-in sessions.
-- Opens automation tabs in the background by default.
-- Provides atomic navigation waiting in `page.goto()` and `browser.openTab()`.
-- Safely auto-dismisses native JavaScript dialogs (`alert`, `confirm`, `prompt`) by default, with opt-in acceptance via `page.setNextDialogAction('accept')` and evidence inspection via `page.lastDialog()`.
-- Produces compact semantic snapshots with temporary `@N` references.
-- Clicks, fills, hovers, checks, unchecks, and selects form elements by snapshot ref or locator.
-- Supports recursive element resolution inside open Shadow DOM roots for semantic locators and selectors (scoped within each open root; compound selectors crossing host boundaries are not supported).
-- Supports local file uploads via `setInputFiles()`.
-- Finds and clicks visible text in dynamic menus and custom elements with a real CDP mouse event.
-- Supports trusted key presses, URL waits, page evaluation, targeted text extraction, selectors, and waits.
-- Requires explicit tab selection before any page operation, preventing accidental takeover of an unrelated tab.
-- Remembers the last automation tab for explicit continuation across CLI invocations while the bridge is running.
-- Includes an installable Agent skill under `skills/ego-chrome`.
-- Does not expose screenshot capture in its default API.
-
-## Architecture
+## 工作架构
 
 ```text
 Agent / AI Agent
-  │
-  │ JavaScript piped to ego-chrome
+  │ JavaScript 管道输入
   ▼
-Local Node CLI ── HTTP RPC ── Local bridge ── long poll ── Chrome MV3 extension
-                                                             │
-                                                             ▼
-                                                   chrome.debugger / CDP
-                                                             │
-                                                             ▼
-                                                   current Chrome profile
+本地 Node.js CLI ── HTTP RPC ── 本地桥接服务
+                                      │
+                                 Chrome 扩展
+                                      │
+                              chrome.debugger / CDP
+                                      │
+                              当前 Chrome Profile
 ```
 
-The bridge binds only to `127.0.0.1` and requires a random 256-bit token. The extension stores the token in `chrome.storage.local` and maintains a localhost long-poll connection to the bridge. This avoids Windows Native Messaging registration and is intended for personal use on one machine.
+桥接服务只绑定到 `127.0.0.1`，并要求随机生成的 256 位令牌。扩展通过本地连接与桥接服务通信。请将令牌视为敏感凭据，不要公开分享。
 
-## Requirements
+## 环境要求
 
-- Windows 10 or 11.
-- Google Chrome 120 or newer.
-- Node.js 20 or newer.
-- An AI Agent runtime with Agent Skills support (e.g. DeepSeek Harness, Claude Code, Codex).
+- Windows 10 或 Windows 11
+- Google Chrome 120 或更新版本
+- Node.js 20 或更新版本
+- 支持 Agent Skills 的 AI Agent 运行环境，例如 Claude Code、Codex 等
 
-## Install
+## 安装
 
-### 1. Clone and install the CLI
+### 1. 下载项目并安装 CLI
 
 ```powershell
 git clone https://github.com/amwangfan/agent-skills.git
@@ -72,108 +54,72 @@ npm install
 npm link
 ```
 
-`npm link` makes `ego-chrome` available globally for the current Node installation.
+`npm link` 会将 `ego-chrome` 命令链接到当前 Node.js 安装环境。
 
-### 2. Create the bridge token
+### 2. 创建本地桥接令牌
 
 ```powershell
 ego-chrome init
 ```
 
-The configuration is stored at:
+配置文件默认位于：
 
 ```text
 %LOCALAPPDATA%\ego-chrome\config.json
 ```
 
-Copy the 64-character token printed by the command.
+请复制命令输出的 64 位十六进制令牌。
 
-### 3. Load the Chrome extension
+### 3. 加载 Chrome 扩展
 
-1. Open `chrome://extensions`.
-2. Enable **Developer mode**.
-3. Select **Load unpacked**.
-4. Choose this repository's `extension` directory.
-5. Open the extension's **Details**, then **Extension options**.
-6. Paste the token from `ego-chrome init` and save.
+1. 在 Chrome 中打开 `chrome://extensions`。
+2. 开启“开发者模式”。
+3. 点击“加载已解压的扩展程序”。
+4. 选择本仓库中的 `extension/` 目录。
+5. 打开扩展详情中的“扩展程序选项”，粘贴上一步生成的令牌并保存。
 
-The toolbar badge shows:
+工具栏状态提示：
 
-- `ON`: connected to the local bridge;
-- `OFF`: the bridge is not running, the token is missing, or the connection failed;
-- `…`: connecting.
+- `ON`：已连接本地桥接服务。
+- `OFF`：桥接服务未运行、令牌缺失或连接失败。
+- `…`：正在连接。
 
-The CLI starts the local bridge automatically on first use. Clicking the extension icon requests a reconnect.
+首次运行 CLI 时会自动启动本地桥接服务。点击扩展图标可请求重新连接。
 
-### 4. Check the connection
+### 4. 检查连接
 
 ```powershell
 ego-chrome --doctor
 ```
 
-A healthy result resembles:
+正常情况下，输出会显示桥接服务和扩展的连接状态、标签页数量及端口。
 
-```json
-{
-  "bridge": "connected",
-  "extension": "connected",
-  "tabs": 8,
-  "port": 32145
-}
-```
-
-### 5. Install the Agent skill
+### 5. 安装 Agent Skill
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1
 ```
 
-The script copies the skill to:
+默认安装到：
 
 ```text
 ~\.agents\skills\ego-chrome
 ```
 
-Restart your agent or reload skills after installation. Rerun the script after updating the repository.
+安装后请重启 Agent 或重新加载技能。更新仓库后，再运行一次安装脚本即可同步 Skill。
 
-## Upgrade
+## 快速开始
 
-```powershell
-git pull
-npm install
-npm link
-powershell -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1
-```
-
-Runtime-only updates do not require reloading the Chrome extension. If files under `extension/` changed, reload the unpacked extension from `chrome://extensions`.
-
-The bridge is a detached Node process. After runtime or bridge changes, stop the old process once so the next CLI invocation starts the new code:
-
-```powershell
-$bridgePid = (
-  Get-NetTCPConnection -LocalPort 32145 -State Listen -ErrorAction SilentlyContinue
-).OwningProcess
-
-if ($bridgePid) {
-  Stop-Process -Id $bridgePid -Force
-}
-```
-
-## Quick start
-
-PowerShell uses a here-string piped to the CLI:
+PowerShell：
 
 ```powershell
 @'
-await browser.openTab('https://example.com', {
-  active: false,
-  wait: true,
-})
+await browser.openTab('https://example.com', { active: false, wait: true })
 console.log(await page.snapshot({ maxChars: 2500 }))
 '@ | ego-chrome nodejs
 ```
 
-Bash-compatible shells can use a heredoc:
+Bash：
 
 ```bash
 ego-chrome nodejs <<'EOF'
@@ -182,9 +128,11 @@ console.log(await page.snapshot({ maxChars: 2500 }))
 EOF
 ```
 
-## Explicit tab safety
+所有可预期的观察、动作、等待、提取和验证都应尽量放在同一次调用中。不要仅为了查看中间输出而退出脚本；最终只输出完成任务所需的结果。
 
-Every CLI invocation must select an automation tab before using `page.*`.
+## 标签页安全规则
+
+每次调用都必须先选择标签页，再使用 `page.*`：
 
 ```javascript
 await browser.openTab(url, { active: false, wait: true })
@@ -194,51 +142,28 @@ await browser.useActiveTab()
 await browser.useTab(tabId)
 ```
 
-The intended meanings are:
+- `openTab`：为新目标创建后台标签页。
+- `openOrReuseTab`：按指定匹配方式复用标签页。
+- `continueLastTab`：在后续 CLI 调用中继续上次的自动化标签页。
+- `useActiveTab`：明确选择当前可见标签页。
+- `useTab`：按已知 ID 选择标签页。
+- `page.goto()`：只在本次调用中已选定的标签页内导航，不会自动选择标签页。
 
-- `openTab`: create a new background tab for a new destination;
-- `openOrReuseTab`: explicitly reuse a matching tab when desired;
-- `continueLastTab`: continue the previous automation tab in a follow-up CLI invocation;
-- `useActiveTab`: explicitly opt into controlling the currently visible user tab;
-- `useTab`: select a known tab ID.
+如果没有选择标签页，页面操作会报错 `No automation tab selected`。运行时不会静默接管用户当前标签页或自动使用上次记忆的标签页。
 
-`page.goto()` only navigates inside a tab that was explicitly selected in the current invocation.
+## 语义快照与定位器
 
-If no tab is selected, page operations fail with:
+快照通常会以文本形式描述页面结构、角色、可访问名称和状态，并给可交互元素分配临时引用（例如 `@1`、`@2`）。引用在生成新快照后可能失效；页面导航或 DOM 大幅变化后，应重新观察并使用新引用。
 
-```text
-No automation tab selected
+优先使用语义定位器：
+
+```javascript
+await page.getByRole('button', { name: /save/i }).click()
+await page.getByLabel('Email').fill('me@example.com')
+const headings = await page.getByRole('heading').allInnerTexts()
 ```
 
-This is deliberate. The runtime never silently falls back to the active user tab or the previously remembered tab.
-
-## Semantic snapshots
-
-A typical result looks like:
-
-```text
-page "Account settings" url="https://example.com/account"
-main
-  heading "Profile" [level=1]
-  @1 textbox "Display name" [value="Example User"]
-  @2 button "Save"
-```
-
-Refs are temporary. A new snapshot rebuilds them, and navigation may make older refs stale.
-
-The snapshot engine uses:
-
-1. `Accessibility.getFullAXTree` for roles, accessible names, values, and states;
-2. `DOMSnapshot.captureSnapshot` to recover meaningful clickable elements omitted by the accessibility tree;
-3. `backendDOMNodeId` references for actions.
-
-No image is sent to the model or agent.
-
-## Dynamic menus and text locators
-
-Modern sites often render menus with nested custom elements. A CSS selector may find a text child rather than the element that owns the click handler.
-
-Use the generic text APIs:
+遇到动态菜单或自定义元素时，可使用 `findText()` 查找候选，并通过 `clickText()` 触发真实浏览器鼠标事件：
 
 ```javascript
 const candidates = await page.findText('Settings', {
@@ -246,147 +171,14 @@ const candidates = await page.findText('Settings', {
   selector: '[role="menuitem"], [role="option"], button, a, li',
   maxResults: 20,
 })
-
-console.log(candidates)
-
 await page.clickText('Settings', {
   exact: true,
   selector: '[role="menuitem"], button, a, li',
   nth: 0,
 })
-
-await page.getByText('Continue', { exact: true }).click()
 ```
 
-`findText()` returns compact candidate summaries. `clickText()` temporarily marks the chosen visible element and then calls the normal CDP-backed click path. The final interaction is a real browser mouse event, not a synthetic JavaScript `.click()`.
-
-Options:
-
-- `exact`: require normalized full-text equality;
-- `caseSensitive`: preserve case during matching;
-- `nth`: choose one match by DOM order;
-- `selector`: restrict candidates to matching ancestors;
-- `maxResults`: cap returned candidate summaries.
-
-## Navigation waits and dialogs
-
-`page.goto()` and `browser.openTab(url, { wait: true })` wait atomically for document readiness.
-
-For an action expected to navigate an already loaded page, start a URL or result-element wait before the action:
-
-```javascript
-const navigated = page.waitForURL(
-  (url) => url.pathname === '/complete',
-  { timeout: 15000 },
-)
-
-await page.locator('button[type=submit]').click()
-
-if (!(await navigated)) {
-  throw new Error('Expected navigation did not occur')
-}
-```
-
-Locator `press()` focuses the element and sends a trusted CDP key event:
-
-```javascript
-const search = page.locator('textarea[name=q], input[name=q]')
-await search.fill('example')
-await search.press('Enter')
-```
-
-### Native dialogs
-
-Native JavaScript dialogs (`window.alert`, `window.confirm`, `window.prompt`) are handled safely by default: the runtime automatically dismisses them so automation does not hang.
-
-If an upcoming action requires accepting a confirmation or prompt, configure the expected action before triggering it:
-
-```javascript
-await page.setNextDialogAction('accept')
-await page.locator('button#confirm-delete').click()
-
-const dialog = await page.lastDialog()
-console.log(dialog) // { type: 'confirm', message: 'Delete this item?', action: 'accept', ... }
-```
-
-## Form controls and hover
-
-The runtime provides dedicated methods for form controls and mouse hovering:
-
-### Checkbox and radio (`check`, `uncheck`, `isChecked`)
-
-- `check()` and `uncheck()` are **idempotent**: calling `check()` on an already-checked element or `uncheck()` on an already-unchecked element does not toggle it again and is safely repeatable.
-- Radio buttons (`input[type="radio"]`) can be checked with `check()`, but **cannot be unchecked** with `uncheck()` (reflecting standard HTML semantics where radio selections cannot be cleared by unchecking).
-- `isChecked()` returns whether the checkbox or radio input is currently checked.
-
-```javascript
-// Idempotent checkbox interactions
-const agree = page.locator('input#agree')
-await agree.check()
-await agree.uncheck()
-const checked = await agree.isChecked()
-
-// Radio buttons can be checked, but cannot be unchecked
-await page.locator('input[type=radio]#option-a').check()
-```
-
-### Dropdown selection (`selectOption`)
-
-`selectOption` selects `<option>` elements within a `<select>` dropdown. In alignment with Playwright conventions, a plain string matches the option's `value` attribute, while matching by visible text requires `{ label: ... }`:
-
-```javascript
-// By string (matches option value attribute; use { label: '...' } for visible text)
-await page.selectOption('select#country', 'US')
-
-// By explicit value attribute
-await page.locator('select#country').selectOption({ value: 'US' })
-
-// By visible label text (label must use an object descriptor)
-await page.locator('select#country').selectOption({ label: 'United States' })
-
-// By 0-based index
-await page.locator('select#country').selectOption({ index: 2 })
-
-// Multi-select with an array of values
-await page.locator('select#skills').selectOption(['javascript', 'python'])
-```
-
-### Hover (`hover`)
-
-`page.hover(selector)` and `locator.hover()` dispatch a CDP mouse move over the element. Use hover only when hovering is strictly required to reveal dynamic menus, dropdown triggers, or tooltips:
-
-```javascript
-await page.locator('.dropdown-trigger').hover()
-await page.hover('button.menu-button')
-```
-
-## File uploads (`setInputFiles`)
-
-`page.setInputFiles(selector, files)` and `locator.setInputFiles(files)` set files on `<input type="file">` elements using Chrome DevTools Protocol (`DOM.setFileInputFiles`):
-
-```javascript
-// Single file upload with an absolute local path
-await page.setInputFiles('input[type=file]', 'C:\\path\\to\\document.pdf')
-
-// Multiple file upload
-await page.locator('input[type=file][multiple]').setInputFiles([
-  'C:\\path\\to\\file1.png',
-  'C:\\path\\to\\file2.png',
-])
-
-// Clear selected files
-await page.locator('input[type=file]').setInputFiles([])
-```
-
-> **⚠️ File Upload Security & Scope:**
-> `setInputFiles` only validates and resolves the local filesystem path(s) and sends them to Chrome via CDP (`DOM.setFileInputFiles`); the ego-chrome bridge itself does **not** read or transport file contents. However, when the form is submitted or processed by the page, Google Chrome and the target website will naturally read and upload the actual file content. The paths must be local absolute paths that the running Chrome process has direct permissions to access.
-
-## Shadow DOM traversal
-
-- **Open Shadow DOM**: The locator engine recursively traverses open shadow roots (`Element.shadowRoot`). Selectors and semantic matchers evaluate within each open root scope to locate elements residing inside open shadow roots. Note that selectors are evaluated within individual root boundaries; complex compound selectors that attempt to cross host boundaries in a single selector expression (e.g. `host > shadow-child`) are not supported.
-- **Closed Shadow DOM**: Closed shadow roots (`mode: "closed"`) cannot be accessed via standard DOM APIs and are **not supported**. Closed shadow DOM boundaries represent an explicit capability limit.
-
-## API
+## 常用 API
 
 ### `browser`
 
@@ -402,29 +194,23 @@ await browser.closeTab(tabId)
 await browser.activateTab(tabId)
 ```
 
-Matching modes are `exact`, `origin`, `origin+path`, and `includes`.
+匹配模式包括 `exact`、`origin`、`origin+path` 和 `includes`。
 
 ### `page`
 
 ```javascript
 await page.snapshot({ maxChars: 12000, includeText: true })
 await page.click('@1')
-await page.click('button[type=submit]')
-await page.hover('button.menu-trigger')
 await page.fill('@2', 'value')
+await page.hover('button.menu-trigger')
 await page.check('input#agree')
 await page.uncheck('input#agree')
 await page.isChecked('input#agree')
 await page.selectOption('select#country', 'US')
-await page.selectOption('select#country', { value: 'US' })
 await page.selectOption('select#country', { label: 'United States' })
-await page.selectOption('select#country', { index: 2 })
 await page.setInputFiles('input[type=file]', 'C:\\path\\to\\file.pdf')
-await page.setInputFiles('input[type=file]', ['C:\\path\\to\\file1.png', 'C:\\path\\to\\file2.png'])
-await page.setInputFiles('input[type=file]', [])
 await page.findText('Menu item', { exact: false })
 await page.clickText('Menu item', { exact: true, nth: 0 })
-await page.getByText('Continue', { exact: true }).click()
 await page.press('Enter')
 await page.goto('https://example.com')
 await page.info()
@@ -435,103 +221,68 @@ await page.textContent('.message')
 await page.count('table tbody tr')
 await page.waitForSelector('.ready', { state: 'visible', timeout: 10000 })
 await page.waitForURL('/complete', { timeout: 10000 })
-await page.waitForURL(/\/orders\/\d+$/, { timeout: 10000 })
-await page.waitForURL((url) => url.searchParams.get('saved') === '1')
 await page.waitForLoadState({ timeout: 20000 })
 await page.waitForTimeout(250)
 await page.setNextDialogAction('accept')
 await page.lastDialog()
 ```
 
-CSS locator facade:
+以上为常用接口示例，具体可用方法以仓库中的运行时代码为准。
 
-```javascript
-const email = page.locator('input[name=email]')
-await email.fill('me@example.com')
-await email.press('Enter')
-await page.locator('button[type=submit]').click()
-await page.locator('button.menu-trigger').hover()
-await page.locator('input#agree').check()
-await page.locator('input#agree').uncheck()
-const isChecked = await page.locator('input#agree').isChecked()
-await page.locator('select#country').selectOption('US')
-await page.locator('select#country').selectOption({ label: 'United States' })
-await page.locator('select#country').selectOption({ index: 2 })
-await page.locator('input[type=file]').setInputFiles('C:\\path\\to\\file.pdf')
-await page.locator('input[type=file]').setInputFiles(['C:\\path\\to\\file1.png', 'C:\\path\\to\\file2.png'])
-await page.locator('input[type=file]').setInputFiles([])
-const status = await page.locator('.status').textContent()
-```
+## 隐私与安全
 
-### `taskSpaces`
+扩展在当前 Chrome Profile 中操作标签页，因此网站会看到与普通浏览器标签页相同的登录 Cookies 和站点存储。项目不会主动导出 Cookies 或凭据；为完成用户请求而读取的快照内容和页面信息会返回给本地 Agent 进程。
 
-```javascript
-const task = await taskSpaces.useOrCreate('short goal name')
-await taskSpaces.complete(task.name, { keep: true })
-```
-
-Task spaces are optional compatibility labels inside one CLI invocation. They do not isolate cookies, local storage, tabs, or site sessions.
-
-## Login state and privacy
-
-The extension controls tabs inside your current Chrome profile, so sites see the same login cookies and storage as your normal tabs.
-
-The project does not export cookies or credentials. Snapshot content and explicit page reads are returned to the local agent process because the agent needs that information to perform the requested task.
-
-Treat the extension's `debugger` permission as sensitive. Rotate the bridge token with:
+Chrome 的 `debugger` 权限非常强，请只安装和使用自己信任的代码，并保护好桥接令牌。需要轮换令牌时执行：
 
 ```powershell
 ego-chrome init --force
 ```
 
-Then update the token in the extension options.
+然后将新令牌同步更新到扩展设置页面。
 
-## Troubleshooting
+文件上传只会由桥接服务通过 CDP 设置文件路径；桥接服务本身不读取或传输文件内容。但当页面提交或处理文件时，Chrome 和目标网站仍会读取并上传实际文件。只使用用户明确指定、且 Chrome 进程有权访问的本地绝对路径。
 
-### Badge stays `OFF`
+## 故障排查
 
-Run:
+### 扩展状态一直是 `OFF`
 
-```powershell
-ego-chrome --doctor
-```
-
-Verify that the extension options contain the same token and port as `%LOCALAPPDATA%\ego-chrome\config.json`, then click the extension icon.
+运行 `ego-chrome --doctor`，确认扩展设置中的令牌和端口与 `%LOCALAPPDATA%\ego-chrome\config.json` 一致，然后点击扩展图标重新连接。
 
 ### `Another debugger is already attached`
 
-Close DevTools for that tab and temporarily disable other browser automation extensions.
+关闭该标签页的 DevTools，并暂时停用其他浏览器自动化扩展。
 
 ### `Unknown or stale ref`
 
-The page changed after the last snapshot. Take one new snapshot and use the new ref.
+页面在上次快照后发生了变化。重新生成一次快照，并使用新引用。
 
 ### `No automation tab selected`
 
-Choose the appropriate explicit browser method. For a new destination, use `browser.openTab()`. For a follow-up command, use `browser.continueLastTab()`.
+显式选择浏览器标签页。新目标使用 `browser.openTab()`；后续调用使用 `browser.continueLastTab()`。
 
-### Action succeeded but the agent ran extra commands
+### 动作成功，但 Agent 又执行了多余命令
 
-Verify the postcondition with `page.waitForURL()` or `page.waitForSelector()` in the same invocation. `page.waitForLoadState()` alone does not prove that an action-triggered navigation occurred.
+在同一次调用中通过 `page.waitForURL()` 或 `page.waitForSelector()` 验证后置条件。仅调用 `page.waitForLoadState()` 不能证明动作触发的导航已经发生。
 
-### Port 32145 is already in use
+### 端口 32145 已被占用
 
-Change `port` in `%LOCALAPPDATA%\ego-chrome\config.json`, then enter the same port in the extension options.
+修改 `%LOCALAPPDATA%\ego-chrome\config.json` 中的 `port`，并在扩展设置中填入相同端口。
 
-## Important limitations
+## 当前限制
 
-- Opening DevTools or attaching another debugger to the same tab can disconnect automation.
-- Deep cross-origin iframe snapshot merging is not implemented yet.
-- Closed Shadow DOM trees cannot be traversed or inspected (open Shadow DOM is recursively supported within each root scope).
-- Downloads and network idle/activity waits are not yet implemented.
-- File uploads (`setInputFiles`) require Chrome to have direct filesystem access to local absolute paths; the ego-chrome bridge itself does not read file bytes, but Chrome and the target website will read and upload the file when the form is submitted.
-- Canvas, WebGL, maps, remote desktops, and visual-only surfaces are not semantically observable.
-- Browser-internal pages such as `chrome://settings` cannot be controlled.
-- Background tabs share the same cookie and storage state. This is intentional for login reuse, not security isolation.
-- The remembered tab survives only while the local bridge process remains running.
-- The bridge is personal-use software and has not received a security audit.
+- 在同一标签页打开 DevTools 或附加另一个 debugger，可能导致自动化断开。
+- 尚未实现深层跨域 iframe 的快照合并。
+- 不支持遍历或检查封闭 Shadow DOM；开放 Shadow DOM 在各自 root 范围内递归支持。
+- 尚未实现下载控制及网络空闲/活动等待。
+- 文件上传要求 Chrome 能直接访问给定的本地绝对路径。
+- Canvas、WebGL、地图、远程桌面和纯视觉界面无法通过语义接口可靠观察。
+- 无法控制 `chrome://settings` 等浏览器内部页面。
+- 后台标签页共享 Cookies 和站点存储，这是复用登录态的设计，不构成安全隔离。
+- 只有本地桥接进程仍在运行时，才能记住上次使用的标签页。
+- 本项目面向个人使用，尚未经过正式安全审计。
 
-## Development
+## 开发
 
 ```powershell
 npm install
@@ -539,16 +290,16 @@ npm run check
 npm test
 ```
 
-After changing extension files, reload the unpacked extension. After changing the skill, rerun `scripts/install-skill.ps1` and restart your agent.
+修改扩展文件后，请在 `chrome://extensions` 中重新加载已解压扩展。修改 Skill 后，请重新运行 `scripts/install-skill.ps1` 并重启 Agent。
 
-## Roadmap
+## 后续规划
 
-1. Recursive cross-origin iframe attachment and snapshot merging.
-2. Incremental snapshot diffs.
-3. Tab-group-backed task spaces.
-4. Downloads and network idle/activity waits.
-5. Explicit visual fallback for exceptional pages, disabled by default.
+1. 递归附加跨域 iframe 并合并快照。
+2. 增量快照差异。
+3. 基于标签页组的任务空间。
+4. 下载与网络空闲/活动等待。
+5. 为特殊页面提供默认关闭的显式视觉回退。
 
-## License
+## 许可
 
 MIT
