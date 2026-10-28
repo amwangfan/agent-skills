@@ -1,32 +1,32 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ego Chrome Bridge</title>
+  <title>Ego Chrome 桥接设置</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
   <main>
-    <h1>Ego Chrome Bridge</h1>
-    <p>Run <code>ego-chrome init</code>, then paste the local bridge token below.</p>
+    <h1>Ego Chrome 桥接设置</h1>
+    <p>先运行 <code>ego-chrome init</code>，然后在下方粘贴本地桥接令牌。</p>
 
     <form id="settings-form">
       <label>
-        Bridge token
+        桥接令牌
         <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required pattern="[a-fA-F0-9]{64}">
       </label>
       <label>
-        Port
+        端口
         <input id="port" name="port" type="number" min="1024" max="65535" required value="32145">
       </label>
-      <button type="submit">Save</button>
+      <button type="submit">保存设置</button>
     </form>
 
     <p id="status" role="status" aria-live="polite"></p>
     <section>
-      <h2>Privacy</h2>
-      <p>The extension connects only to <code>127.0.0.1</code>. It can read and control tabs that AI Agents explicitly use because the Chrome debugger permission is powerful. Review the source and keep the token private.</p>
+      <h2>隐私与安全</h2>
+      <p>扩展仅连接到 <code>127.0.0.1</code>。由于 Chrome debugger 权限较强，AI Agent 可以读取和控制明确交由其操作的标签页。请审阅源代码，并妥善保管桥接令牌。</p>
     </section>
   </main>
   <script type="module" src="options.js"></script>
