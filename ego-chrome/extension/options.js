@@ -12,15 +12,15 @@ form.addEventListener('submit', async (event) => {
   const token = tokenInput.value.trim()
   const port = Number(portInput.value)
   if (!/^[a-f0-9]{64}$/i.test(token)) {
-    status.textContent = 'The token must contain exactly 64 hexadecimal characters.'
+    status.textContent = '令牌必须恰好包含 64 个十六进制字符。'
     return
   }
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-    status.textContent = 'Choose a port from 1024 to 65535.'
+    status.textContent = '请选择 1024 至 65535 之间的端口。'
     return
   }
   await chrome.storage.local.set({ token, port })
-  status.textContent = 'Saved. Checking bridge connection...'
+  status.textContent = '设置已保存，正在检查桥接连接……'
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 3000)
@@ -36,27 +36,27 @@ form.addEventListener('submit', async (event) => {
     })
 
     if (response.status === 401) {
-      status.textContent = 'Saved, but unauthorized (401): the token was rejected by the bridge.'
+      status.textContent = '设置已保存，但认证失败（401）：桥接服务拒绝了该令牌。'
       return
     }
 
     const data = await response.json().catch(() => ({}))
     if (!response.ok || data.error) {
-      status.textContent = `Saved, but bridge returned an error (${response.status}): ${data.error?.message || 'unknown error'}`
+      status.textContent = `设置已保存，但桥接服务返回错误（${response.status}）：${data.error?.message || '未知错误'}`
       return
     }
 
     if (data.result?.bridge === 'connected') {
-      const extStatus = data.result.extension === 'connected' ? 'connected' : 'connecting'
-      status.textContent = `Saved and connected to bridge on port ${port} (bridge: connected, extension: ${extStatus}).`
+      const extStatus = data.result.extension === 'connected' ? '已连接' : '正在连接'
+      status.textContent = `设置已保存，已连接到端口 ${port} 的桥接服务（桥接：已连接，扩展：${extStatus}）。`
     } else {
-      status.textContent = `Saved and connected to bridge on port ${port}.`
+      status.textContent = `设置已保存，已连接到端口 ${port} 的桥接服务。`
     }
   } catch (error) {
     if (error?.name === 'AbortError') {
-      status.textContent = `Saved, but connection check timed out. Bridge at http://127.0.0.1:${port} is unreachable. Run a normal ego-chrome command or 'ego-chrome --doctor' to start/check the bridge.`
+      status.textContent = `设置已保存，但连接检查超时。无法访问 http://127.0.0.1:${port}。请运行一次正常的 ego-chrome 命令或执行 'ego-chrome --doctor' 来启动/检查桥接服务。`
     } else {
-      status.textContent = `Saved, but local bridge is unreachable on port ${port}. Run a normal ego-chrome command or 'ego-chrome --doctor' to start/check the bridge.`
+      status.textContent = `设置已保存，但无法连接端口 ${port} 上的本地桥接服务。请运行一次正常的 ego-chrome 命令或执行 'ego-chrome --doctor' 来启动/检查桥接服务。`
     }
   } finally {
     clearTimeout(timer)
