@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Ego Chrome Bridge",
+  "name": "Ego Chrome 桥接",
   "version": "0.3.0",
-  "description": "Local semantic browser automation bridge for AI Agents.",
+  "description": "面向 AI Agent 的本地语义浏览器自动化桥接。",
   "minimum_chrome_version": "120",
   "permissions": [
     "alarms",
@@ -15,7 +15,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Reconnect Ego Chrome Bridge"
+    "default_title": "重新连接 Ego Chrome 桥接"
   },
   "options_page": "options.html",
   "content_security_policy": {
